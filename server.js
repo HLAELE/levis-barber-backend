@@ -1,5 +1,4 @@
 const express = require('express');
-const cors = require('cors');
 const mysql = require('mysql2');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
@@ -18,34 +17,38 @@ const allowedOrigins = [
     'http://localhost:3002'
 ];
 
-app.use(cors({
-    origin: function(origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl)
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) !== -1) {
-            callback(null, true);
-        } else {
-            console.log('Origin blocked:', origin);
-            callback(null, true); // Allow anyway for testing
-        }
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
-}));
-
-// Handle preflight requests
-app.options('*', cors());
+// CORS middleware - must be BEFORE routes
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (allowedOrigins.includes(origin)) {
+        res.header('Access-Control-Allow-Origin', origin);
+    }
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    
+    // Handle preflight requests
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
 
 app.use(express.json());
 
 // ============ DATABASE CONNECTION ============
+const DB_HOST = process.env.DB_HOST || process.env.Host || 'localhost';
+const DB_USER = process.env.DB_USER || process.env.Username || 'root';
+const DB_PASSWORD = process.env.DB_PASSWORD || process.env.Password || '';
+const DB_NAME = process.env.DB_NAME || process.env.Database || 'levis_fis';
+const DB_PORT = process.env.DB_PORT || process.env.Port || 3306;
+
 const db = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || 'HLAELEmosa@09092001',
-    database: process.env.DB_NAME || 'levis_fis',
-    port: process.env.DB_PORT || 3306,
+    host: DB_HOST,
+    user: DB_USER,
+    password: DB_PASSWORD,
+    database: DB_NAME,
+    port: DB_PORT,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
@@ -53,8 +56,21 @@ const db = mysql.createPool({
 });
 
 const promiseDb = db.promise();
+const JWT_SECRET = process.env.JWT_SECRET || 'levis_barber_secret_key_2026';
 
 console.log('✅ Database connection pool created');
+console.log(`📊 Database: ${DB_NAME}`);
+console.log(`🔗 Host: ${DB_HOST}:${DB_PORT}`);
+
+// ============ TEST ENDPOINT (NO AUTH) ============
+app.get('/api/ping', (req, res) => {
+    res.json({ 
+        message: 'Backend is alive!', 
+        timestamp: new Date().toISOString(),
+        database: DB_NAME,
+        cors: 'enabled'
+    });
+});
 
 // ============ MIDDLEWARE ============
 const authenticateToken = (req, res, next) => {
@@ -66,7 +82,7 @@ const authenticateToken = (req, res, next) => {
     }
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'levis_barber_secret_key_2026');
+        const decoded = jwt.verify(token, JWT_SECRET);
         req.user = decoded;
         next();
     } catch (error) {
@@ -166,7 +182,7 @@ app.post('/api/auth/login', async (req, res) => {
                 role: user.role,
                 full_name: user.full_name
             },
-            process.env.JWT_SECRET || 'levis_barber_secret_key_2026',
+            JWT_SECRET,
             { expiresIn: '7d' }
         );
 
@@ -203,10 +219,10 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     }
 });
 
-// Test endpoint
+// Test users endpoint
 app.get('/api/test/users', async (req, res) => {
     try {
-        const [users] = await promiseDb.query('SELECT user_id, full_name, username, password, role, is_approved FROM users');
+        const [users] = await promiseDb.query('SELECT user_id, full_name, username, role, is_approved FROM users');
         res.json(users);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -783,6 +799,7 @@ app.get('/api/customer/my-complaints/:userId', authenticateToken, authorizeRoles
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
     console.log(`🚀 Backend running on http://localhost:${PORT}`);
-    console.log(`📊 Database: ${process.env.DB_NAME || 'levis_fis'}`);
-    console.log(`🔐 CORS enabled for Vercel frontend`);
+    console.log(`📊 Database: ${DB_NAME}`);
+    console.log(`🔐 JWT Secret: ${JWT_SECRET ? 'Set' : 'Using default'}`);
+    console.log(`🌐 CORS enabled for Vercel frontend`);
 });
