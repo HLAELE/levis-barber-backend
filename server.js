@@ -8,6 +8,16 @@ dotenv.config();
 
 const app = express();
 
+// Centralized secrets (do not hardcode in repo)
+const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT || 'dev_jwt_secret';
+
+// Support common Render env var names (e.g., Database, Host, Password, Port, Username)
+const DB_HOST = process.env.DB_HOST || process.env.Host || process.env.DBHOST || 'localhost';
+const DB_USER = process.env.DB_USER || process.env.Username || process.env.USERNAME || process.env.DBUSER || 'root';
+const DB_PASSWORD = process.env.DB_PASSWORD || process.env.Password || process.env.DBPASS || '';
+const DB_NAME = process.env.DB_NAME || process.env.Database || process.env.DBNAME || 'levis_fis';
+const DB_PORT = process.env.DB_PORT || process.env.Port || process.env.DBPORT || undefined;
+
 // CORS configuration for Vercel frontend
 app.use(cors({
     origin: [
@@ -22,10 +32,11 @@ app.use(express.json());
 
 // MySQL connection pool
 const db = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || 'HLAELEmosa@09092001',
-    database: process.env.DB_NAME || 'levis_fis',
+    host: DB_HOST,
+    user: DB_USER,
+    password: DB_PASSWORD,
+    database: DB_NAME,
+    port: DB_PORT,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
@@ -45,7 +56,7 @@ const authenticateToken = (req, res, next) => {
     }
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'levis_barber_secret_key_2026');
+        const decoded = jwt.verify(token, JWT_SECRET);
         req.user = decoded;
         next();
     } catch (error) {
@@ -145,7 +156,7 @@ app.post('/api/auth/login', async (req, res) => {
                 role: user.role,
                 full_name: user.full_name
             },
-            process.env.JWT_SECRET || 'levis_barber_secret_key_2026',
+            JWT_SECRET,
             { expiresIn: '7d' }
         );
 
@@ -784,5 +795,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
     console.log(`🚀 Backend running on http://localhost:${PORT}`);
     console.log(`📊 Database: ${process.env.DB_NAME || 'levis_fis'}`);
-    console.log(`🔐 JWT Secret: ${process.env.JWT_SECRET ? 'Set' : 'Using default'}`);
+    console.log(`🔐 JWT Secret: ${process.env.JWT_SECRET ? 'Set' : 'Using default (INSECURE - set JWT_SECRET in environment)'}`);
 });
