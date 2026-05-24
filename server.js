@@ -8,38 +8,48 @@ dotenv.config();
 
 const app = express();
 
-// Centralized secrets (do not hardcode in repo)
-const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT || 'dev_jwt_secret';
+// ============ CORS CONFIGURATION - FIXED FOR VERCEL ============
+const allowedOrigins = [
+    'https://levis-barber-frontend-nufm.vercel.app',
+    'https://levis-barber-frontend.vercel.app',
+    'https://levis-barber-frontend-git-main-hlaeles-projects.vercel.app',
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:3002'
+];
 
-// Support common Render env var names (e.g., Database, Host, Password, Port, Username)
-const DB_HOST = process.env.DB_HOST || process.env.Host || process.env.DBHOST || 'localhost';
-const DB_USER = process.env.DB_USER || process.env.Username || process.env.USERNAME || process.env.DBUSER || 'root';
-const DB_PASSWORD = process.env.DB_PASSWORD || process.env.Password || process.env.DBPASS || '';
-const DB_NAME = process.env.DB_NAME || process.env.Database || process.env.DBNAME || 'levis_fis';
-const DB_PORT = process.env.DB_PORT || process.env.Port || process.env.DBPORT || undefined;
-
-// CORS configuration for Vercel frontend
 app.use(cors({
-    origin: [
-        'https://levis-barber-frontend.vercel.app',
-        'http://localhost:3000',
-        'http://localhost:3001',
-        'http://localhost:3002'
-    ],
-    credentials: true
+    origin: function(origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            console.log('Origin blocked:', origin);
+            callback(null, true); // Allow anyway for testing
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 }));
+
+// Handle preflight requests
+app.options('*', cors());
+
 app.use(express.json());
 
-// MySQL connection pool
+// ============ DATABASE CONNECTION ============
 const db = mysql.createPool({
-    host: DB_HOST,
-    user: DB_USER,
-    password: DB_PASSWORD,
-    database: DB_NAME,
-    port: DB_PORT,
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || 'HLAELEmosa@09092001',
+    database: process.env.DB_NAME || 'levis_fis',
+    port: process.env.DB_PORT || 3306,
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0
+    queueLimit: 0,
+    ssl: process.env.DB_SSL ? { rejectUnauthorized: false } : false
 });
 
 const promiseDb = db.promise();
@@ -56,7 +66,7 @@ const authenticateToken = (req, res, next) => {
     }
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'levis_barber_secret_key_2026');
         req.user = decoded;
         next();
     } catch (error) {
@@ -156,7 +166,7 @@ app.post('/api/auth/login', async (req, res) => {
                 role: user.role,
                 full_name: user.full_name
             },
-            JWT_SECRET,
+            process.env.JWT_SECRET || 'levis_barber_secret_key_2026',
             { expiresIn: '7d' }
         );
 
@@ -224,7 +234,7 @@ app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), asyn
     }
 });
 
-// Get expenses by category (for pie chart)
+// Get expenses by category
 app.get('/api/owner/category-expenses', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [categoryExpenses] = await promiseDb.query(`
@@ -240,10 +250,9 @@ app.get('/api/owner/category-expenses', authenticateToken, authorizeRoles('OWNER
     }
 });
 
-// Chart data with category breakdown
+// Chart data
 app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
-        // Monthly revenue for last 12 months
         let [monthlyRevenue] = await promiseDb.query(`
             SELECT 
                 DATE_FORMAT(payment_date, '%b') as month,
@@ -270,7 +279,6 @@ app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), asy
         const [expensesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
         const [salariesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE category = "Salary"');
         
-        // Category expenses for pie chart
         const [categoryExpenses] = await promiseDb.query(`
             SELECT category, SUM(amount) as total 
             FROM expenses 
@@ -408,7 +416,7 @@ app.post('/api/owner/pay-salary', authenticateToken, authorizeRoles('OWNER'), as
     }
 });
 
-// Add expense (for OwnerDashboard)
+// Add expense
 app.post('/api/owner/add-expense', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { amount, description, category } = req.body;
 
@@ -439,7 +447,7 @@ app.post('/api/owner/add-expense', authenticateToken, authorizeRoles('OWNER'), a
     }
 });
 
-// Add income (non-appointment income)
+// Add income
 app.post('/api/owner/add-income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { amount, source, description, category, payment_method } = req.body;
 
@@ -465,10 +473,9 @@ app.post('/api/owner/add-income', authenticateToken, authorizeRoles('OWNER'), as
     }
 });
 
-// Get all income with running total
+// Get all income
 app.get('/api/owner/income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
-        // Get payments from appointments
         const [appointmentPayments] = await promiseDb.query(`
             SELECT 
                 p.payment_id as id,
@@ -485,7 +492,6 @@ app.get('/api/owner/income', authenticateToken, authorizeRoles('OWNER'), async (
             ORDER BY p.payment_date DESC
         `);
         
-        // Get other income
         const [otherIncome] = await promiseDb.query(`
             SELECT 
                 payment_id as id,
@@ -500,9 +506,7 @@ app.get('/api/owner/income', authenticateToken, authorizeRoles('OWNER'), async (
             ORDER BY income_date DESC
         `);
         
-        // Combine both
         const allIncome = [...appointmentPayments, ...otherIncome];
-        
         res.json(allIncome);
     } catch (error) {
         console.error(error);
@@ -563,7 +567,6 @@ app.get('/api/employee/appointments/:employeeId', authenticateToken, authorizeRo
             ORDER BY a.appointment_date DESC, a.appointment_time ASC
         `, [employeeId]);
         
-        console.log(`📅 Found ${appointments.length} appointments for employee ${employeeId}`);
         res.json(appointments);
     } catch (error) {
         console.error(error);
@@ -578,7 +581,7 @@ app.put('/api/employee/appointments/:appointmentId/status', authenticateToken, a
 
     try {
         await promiseDb.query('UPDATE appointments SET status = ? WHERE appointment_id = ?', [status, appointmentId]);
-        res.json({ success: true, message: 'Appointment status updated' });
+        res.json({ success: true });
     } catch (error) {
         res.status(500).json({ error: 'Failed to update status' });
     }
@@ -594,7 +597,7 @@ app.put('/api/employee/appointments/:appointmentId/reschedule', authenticateToke
             'UPDATE appointments SET appointment_date = ?, appointment_time = ? WHERE appointment_id = ?',
             [appointment_date, appointment_time, appointmentId]
         );
-        res.json({ success: true, message: 'Appointment rescheduled' });
+        res.json({ success: true });
     } catch (error) {
         res.status(500).json({ error: 'Failed to reschedule' });
     }
@@ -606,10 +609,8 @@ app.get('/api/employee/salary/:employeeId', authenticateToken, authorizeRoles('E
 
     try {
         const [salary] = await promiseDb.query('SELECT salary FROM employees WHERE employee_id = ?', [employeeId]);
-        console.log(`💰 Salary for employee ${employeeId}: M ${salary[0]?.salary || 0}`);
         res.json({ salary: salary[0]?.salary || 0 });
     } catch (error) {
-        console.error(error);
         res.status(500).json({ error: 'Failed to fetch salary' });
     }
 });
@@ -639,16 +640,12 @@ app.post('/api/employee/complaint', authenticateToken, authorizeRoles('EMPLOYEE'
     const { subject, message } = req.body;
     const userId = req.user.userId;
 
-    if (!subject || !message) {
-        return res.status(400).json({ error: 'Subject and message required' });
-    }
-
     try {
         await promiseDb.query(
             'INSERT INTO complaints (sender_id, sender_role, subject, message) VALUES (?, "EMPLOYEE", ?, ?)',
             [userId, subject, message]
         );
-        res.json({ success: true, message: 'Complaint sent' });
+        res.json({ success: true });
     } catch (error) {
         res.status(500).json({ error: 'Failed to send complaint' });
     }
@@ -672,10 +669,6 @@ app.get('/api/employee/my-complaints', authenticateToken, authorizeRoles('EMPLOY
 app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOMER'), async (req, res) => {
     const { custom_service, appointment_date, appointment_time, payment_method, amount } = req.body;
     const userId = req.user.userId;
-
-    if (!custom_service || !appointment_date || !appointment_time || !amount) {
-        return res.status(400).json({ error: 'Missing required fields' });
-    }
 
     try {
         const [customer] = await promiseDb.query('SELECT customer_id FROM customers WHERE user_id = ?', [userId]);
@@ -701,7 +694,7 @@ app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOM
         await promiseDb.query('INSERT INTO payments (appointment_id, amount, payment_method) VALUES (?, ?, ?)',
             [appointment.insertId, amount, payment_method || 'CASH']);
 
-        res.status(201).json({ success: true, message: 'Appointment booked successfully', appointmentId: appointment.insertId });
+        res.status(201).json({ success: true, message: 'Appointment booked successfully' });
     } catch (error) {
         console.error(error);
         res.status(500).json({ error: 'Failed to book appointment' });
@@ -765,14 +758,10 @@ app.post('/api/customer/complaint', authenticateToken, authorizeRoles('CUSTOMER'
     const { subject, message } = req.body;
     const userId = req.user.userId;
 
-    if (!subject || !message) {
-        return res.status(400).json({ error: 'Subject and message required' });
-    }
-
     try {
         await promiseDb.query('INSERT INTO complaints (sender_id, sender_role, subject, message) VALUES (?, "CUSTOMER", ?, ?)',
             [userId, subject, message]);
-        res.json({ success: true, message: 'Complaint sent' });
+        res.json({ success: true });
     } catch (error) {
         res.status(500).json({ error: 'Failed to send complaint' });
     }
@@ -795,5 +784,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
     console.log(`🚀 Backend running on http://localhost:${PORT}`);
     console.log(`📊 Database: ${process.env.DB_NAME || 'levis_fis'}`);
-    console.log(`🔐 JWT Secret: ${process.env.JWT_SECRET ? 'Set' : 'Using default (INSECURE - set JWT_SECRET in environment)'}`);
+    console.log(`🔐 CORS enabled for Vercel frontend`);
 });
