@@ -42,8 +42,8 @@ const DB_HOST = env.DB_HOST || env.DBHOST || env.Host || env.host || env.HOST ||
 const DB_USER = env.DB_USER || env.DBUSER || env.Username || env.username || env.USERNAME || 'root';
 const DB_PASSWORD = env.DB_PASSWORD || env.DBPASS || env.Password || env.password || env.PASSWORD || '';
 const DB_NAME = env.DB_NAME || env.DBNAME || env.Database || env.database || env.DATABASE || 'levis_fis';
-const DB_PORT = env.DB_PORT || env.DBPORT || env.Port || env.port || env.PORT || 3306;
-const DB_SSL = env.DB_SSL === 'true' || env.DB_SSL === '1' || env.DB_SSL === 'yes';
+const DB_PORT = parseInt(env.DB_PORT || env.DBPORT || env.Port || env.port || env.PORT || '3306');
+const DB_SSL = env.DB_SSL === 'true' || env.DB_SSL === '1' || env.DB_SSL === 'yes' || DB_HOST.includes('aivencloud');
 
 const db = mysql.createPool({
     host: DB_HOST,
@@ -54,7 +54,9 @@ const db = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-    ssl: DB_SSL ? { rejectUnauthorized: false } : undefined
+    ssl: DB_SSL ? { rejectUnauthorized: false } : false,
+    enableKeepAlive: true,
+    keepAliveInitialDelayMs: 0
 });
 
 const promiseDb = db.promise();
@@ -63,6 +65,7 @@ const JWT_SECRET = env.JWT_SECRET || env.JWT || 'levis_barber_secret_key_2026';
 console.log('✅ Database connection pool created');
 console.log(`📊 Database: ${DB_NAME}`);
 console.log(`🔗 Host: ${DB_HOST}:${DB_PORT}`);
+console.log(`🔒 SSL: ${DB_SSL}`);
 
 // ============ TEST ENDPOINT (NO AUTH) ============
 app.get('/api/ping', (req, res) => {
@@ -72,6 +75,38 @@ app.get('/api/ping', (req, res) => {
         database: DB_NAME,
         cors: 'enabled'
     });
+});
+
+// ============ HEALTH CHECK ENDPOINT ============
+app.get('/api/health', async (req, res) => {
+    try {
+        const [result] = await promiseDb.query('SELECT 1 as connected');
+        res.json({ 
+            status: 'ok',
+            database: {
+                host: DB_HOST,
+                port: DB_PORT,
+                name: DB_NAME,
+                user: DB_USER,
+                connected: true
+            },
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('Health check failed:', error.message);
+        res.status(503).json({ 
+            status: 'error',
+            error: error.message,
+            database: {
+                host: DB_HOST,
+                port: DB_PORT,
+                name: DB_NAME,
+                user: DB_USER,
+                connected: false
+            },
+            timestamp: new Date().toISOString()
+        });
+    }
 });
 
 // ============ MIDDLEWARE ============
