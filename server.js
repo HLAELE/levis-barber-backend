@@ -140,7 +140,7 @@ const authorizeRoles = (...roles) => {
 
 // Register
 app.post('/api/auth/register', async (req, res) => {
-    const { full_name, username, password, role, phone, email } = req.body;
+    const { full_name, username, password, role } = req.body;
 
     if (!full_name || !username || !password) {
         return res.status(400).json({ error: 'Full name, username and password are required' });
@@ -163,13 +163,6 @@ app.post('/api/auth/register', async (req, res) => {
         );
 
         const userId = result.insertId;
-
-        if (role === 'CUSTOMER') {
-            await promiseDb.query(
-                'INSERT INTO customers (full_name, phone, email, user_id) VALUES (?, ?, ?, ?)',
-                [full_name, phone || null, email || null, userId]
-            );
-        }
 
         res.status(201).json({ 
             success: true, 
