@@ -37,11 +37,13 @@ app.use((req, res, next) => {
 app.use(express.json());
 
 // ============ DATABASE CONNECTION ============
-const DB_HOST = process.env.DB_HOST || process.env.Host || 'localhost';
-const DB_USER = process.env.DB_USER || process.env.Username || 'root';
-const DB_PASSWORD = process.env.DB_PASSWORD || process.env.Password || '';
-const DB_NAME = process.env.DB_NAME || process.env.Database || 'levis_fis';
-const DB_PORT = process.env.DB_PORT || process.env.Port || 3306;
+const env = process.env;
+const DB_HOST = env.DB_HOST || env.DBHOST || env.Host || env.host || env.HOST || 'localhost';
+const DB_USER = env.DB_USER || env.DBUSER || env.Username || env.username || env.USERNAME || 'root';
+const DB_PASSWORD = env.DB_PASSWORD || env.DBPASS || env.Password || env.password || env.PASSWORD || '';
+const DB_NAME = env.DB_NAME || env.DBNAME || env.Database || env.database || env.DATABASE || 'levis_fis';
+const DB_PORT = env.DB_PORT || env.DBPORT || env.Port || env.port || env.PORT || 3306;
+const DB_SSL = env.DB_SSL === 'true' || env.DB_SSL === '1' || env.DB_SSL === 'yes';
 
 const db = mysql.createPool({
     host: DB_HOST,
@@ -52,11 +54,11 @@ const db = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-    ssl: process.env.DB_SSL ? { rejectUnauthorized: false } : false
+    ssl: DB_SSL ? { rejectUnauthorized: false } : undefined
 });
 
 const promiseDb = db.promise();
-const JWT_SECRET = process.env.JWT_SECRET || 'levis_barber_secret_key_2026';
+const JWT_SECRET = env.JWT_SECRET || env.JWT || 'levis_barber_secret_key_2026';
 
 console.log('✅ Database connection pool created');
 console.log(`📊 Database: ${DB_NAME}`);
@@ -198,8 +200,8 @@ app.post('/api/auth/login', async (req, res) => {
         });
 
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Login failed' });
+        console.error('Login route failed:', error);
+        res.status(500).json({ error: 'Login failed', details: error.message });
     }
 });
 
