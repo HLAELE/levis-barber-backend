@@ -7,8 +7,9 @@ dotenv.config();
 
 const app = express();
 
-// ============ CORS CONFIGURATION - FIXED FOR VERCEL ============
+// ============ CORS CONFIGURATION - FULLY FIXED ============
 const allowedOrigins = [
+    'https://levis-barber-frontend-nufm-l8gi9shg2-hlaeles-projects.vercel.app',
     'https://levis-barber-frontend-nufm.vercel.app',
     'https://levis-barber-frontend.vercel.app',
     'https://levis-barber-frontend-git-main-hlaeles-projects.vercel.app',
@@ -17,20 +18,31 @@ const allowedOrigins = [
     'http://localhost:3002'
 ];
 
-// CORS middleware - must be BEFORE routes
+// CORS middleware - MUST BE FIRST
 app.use((req, res, next) => {
     const origin = req.headers.origin;
+    
+    // Allow any of the allowed origins
     if (allowedOrigins.includes(origin)) {
         res.header('Access-Control-Allow-Origin', origin);
+    } else if (origin && origin.includes('vercel.app')) {
+        // Allow any vercel.app subdomain dynamically
+        res.header('Access-Control-Allow-Origin', origin);
+    } else {
+        // For development
+        res.header('Access-Control-Allow-Origin', '*');
     }
+    
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
     res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Max-Age', '86400'); // 24 hours
     
-    // Handle preflight requests
+    // Handle preflight requests immediately
     if (req.method === 'OPTIONS') {
-        return res.sendStatus(200);
+        return res.status(200).end();
     }
+    
     next();
 });
 
@@ -38,12 +50,12 @@ app.use(express.json());
 
 // ============ DATABASE CONNECTION ============
 const env = process.env;
-const DB_HOST = env.DB_HOST || env.DBHOST || env.Host || env.host || env.HOST || 'localhost';
-const DB_USER = env.DB_USER || env.DBUSER || env.Username || env.username || env.USERNAME || 'root';
-const DB_PASSWORD = env.DB_PASSWORD || env.DBPASS || env.Password || env.password || env.PASSWORD || '';
-const DB_NAME = env.DB_NAME || env.DBNAME || env.Database || env.database || env.DATABASE || 'levis_fis';
-const DB_PORT = parseInt(env.DB_PORT || env.DBPORT || env.Port || env.port || env.PORT || '3306');
-const DB_SSL = env.DB_SSL === 'true' || env.DB_SSL === '1' || env.DB_SSL === 'yes' || DB_HOST.includes('aivencloud');
+const DB_HOST = env.DB_HOST || env.DBHOST || env.Host || 'localhost';
+const DB_USER = env.DB_USER || env.DBUSER || env.Username || 'root';
+const DB_PASSWORD = env.DB_PASSWORD || env.DBPASS || env.Password || '';
+const DB_NAME = env.DB_NAME || env.DBNAME || env.Database || 'levis_fis';
+const DB_PORT = parseInt(env.DB_PORT || env.DBPORT || env.Port || '3306');
+const DB_SSL = env.DB_SSL === 'true' || env.DB_SSL === '1' || DB_HOST.includes('aivencloud');
 
 const db = mysql.createPool({
     host: DB_HOST,
@@ -55,8 +67,7 @@ const db = mysql.createPool({
     connectionLimit: 10,
     queueLimit: 0,
     ssl: DB_SSL ? { rejectUnauthorized: false } : false,
-    enableKeepAlive: true,
-    keepAliveInitialDelayMs: 0
+    enableKeepAlive: true
 });
 
 const promiseDb = db.promise();
@@ -67,7 +78,7 @@ console.log(`📊 Database: ${DB_NAME}`);
 console.log(`🔗 Host: ${DB_HOST}:${DB_PORT}`);
 console.log(`🔒 SSL: ${DB_SSL}`);
 
-// ============ TEST ENDPOINT (NO AUTH) ============
+// ============ TEST ENDPOINTS (NO AUTH) ============
 app.get('/api/ping', (req, res) => {
     res.json({ 
         message: 'Backend is alive!', 
@@ -77,34 +88,19 @@ app.get('/api/ping', (req, res) => {
     });
 });
 
-// ============ HEALTH CHECK ENDPOINT ============
 app.get('/api/health', async (req, res) => {
     try {
         const [result] = await promiseDb.query('SELECT 1 as connected');
         res.json({ 
             status: 'ok',
-            database: {
-                host: DB_HOST,
-                port: DB_PORT,
-                name: DB_NAME,
-                user: DB_USER,
-                connected: true
-            },
+            database: { host: DB_HOST, name: DB_NAME, connected: true },
             timestamp: new Date().toISOString()
         });
     } catch (error) {
-        console.error('Health check failed:', error.message);
         res.status(503).json({ 
             status: 'error',
             error: error.message,
-            database: {
-                host: DB_HOST,
-                port: DB_PORT,
-                name: DB_NAME,
-                user: DB_USER,
-                connected: false
-            },
-            timestamp: new Date().toISOString()
+            database: { host: DB_HOST, name: DB_NAME, connected: false }
         });
     }
 });
@@ -138,7 +134,6 @@ const authorizeRoles = (...roles) => {
 
 // ============ AUTH ENDPOINTS ============
 
-// Register
 app.post('/api/auth/register', async (req, res) => {
     const { full_name, username, password, role } = req.body;
 
@@ -175,7 +170,6 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// Login
 app.post('/api/auth/login', async (req, res) => {
     const { username, password } = req.body;
 
@@ -233,7 +227,6 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// Get current user
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
     try {
         const [users] = await promiseDb.query(
@@ -249,7 +242,6 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     }
 });
 
-// Test users endpoint
 app.get('/api/test/users', async (req, res) => {
     try {
         const [users] = await promiseDb.query('SELECT user_id, full_name, username, role, is_approved FROM users');
@@ -261,7 +253,6 @@ app.get('/api/test/users', async (req, res) => {
 
 // ============ OWNER ENDPOINTS ============
 
-// Dashboard stats
 app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [revenueResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
@@ -280,7 +271,6 @@ app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), asyn
     }
 });
 
-// Get expenses by category
 app.get('/api/owner/category-expenses', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [categoryExpenses] = await promiseDb.query(`
@@ -296,7 +286,6 @@ app.get('/api/owner/category-expenses', authenticateToken, authorizeRoles('OWNER
     }
 });
 
-// Chart data
 app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         let [monthlyRevenue] = await promiseDb.query(`
@@ -362,7 +351,6 @@ app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), asy
     }
 });
 
-// Pending employees
 app.get('/api/owner/pending-employees', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [employees] = await promiseDb.query(`
@@ -377,7 +365,6 @@ app.get('/api/owner/pending-employees', authenticateToken, authorizeRoles('OWNER
     }
 });
 
-// Approve employee
 app.post('/api/owner/approve-employee/:userId', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { userId } = req.params;
     const { position, salary, phone, hire_date } = req.body;
@@ -401,7 +388,6 @@ app.post('/api/owner/approve-employee/:userId', authenticateToken, authorizeRole
     }
 });
 
-// Reject employee
 app.delete('/api/owner/reject-employee/:userId', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { userId } = req.params;
 
@@ -420,7 +406,6 @@ app.delete('/api/owner/reject-employee/:userId', authenticateToken, authorizeRol
     }
 });
 
-// Get all employees
 app.get('/api/owner/employees', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [employees] = await promiseDb.query(`
@@ -435,7 +420,6 @@ app.get('/api/owner/employees', authenticateToken, authorizeRoles('OWNER'), asyn
     }
 });
 
-// Pay salary
 app.post('/api/owner/pay-salary', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { employee_id, amount, description } = req.body;
 
@@ -462,7 +446,6 @@ app.post('/api/owner/pay-salary', authenticateToken, authorizeRoles('OWNER'), as
     }
 });
 
-// Add expense
 app.post('/api/owner/add-expense', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { amount, description, category } = req.body;
 
@@ -493,7 +476,6 @@ app.post('/api/owner/add-expense', authenticateToken, authorizeRoles('OWNER'), a
     }
 });
 
-// Add income
 app.post('/api/owner/add-income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { amount, source, description, category, payment_method } = req.body;
 
@@ -519,7 +501,6 @@ app.post('/api/owner/add-income', authenticateToken, authorizeRoles('OWNER'), as
     }
 });
 
-// Get all income
 app.get('/api/owner/income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [appointmentPayments] = await promiseDb.query(`
@@ -560,7 +541,6 @@ app.get('/api/owner/income', authenticateToken, authorizeRoles('OWNER'), async (
     }
 });
 
-// Get complaints
 app.get('/api/owner/complaints', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [complaints] = await promiseDb.query(`
@@ -575,7 +555,6 @@ app.get('/api/owner/complaints', authenticateToken, authorizeRoles('OWNER'), asy
     }
 });
 
-// Reply to complaint
 app.post('/api/owner/reply-complaint/:complaintId', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { complaintId } = req.params;
     const { reply } = req.body;
@@ -597,7 +576,6 @@ app.post('/api/owner/reply-complaint/:complaintId', authenticateToken, authorize
 
 // ============ EMPLOYEE ENDPOINTS ============
 
-// Get employee appointments
 app.get('/api/employee/appointments/:employeeId', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const { employeeId } = req.params;
 
@@ -620,7 +598,6 @@ app.get('/api/employee/appointments/:employeeId', authenticateToken, authorizeRo
     }
 });
 
-// Update appointment status
 app.put('/api/employee/appointments/:appointmentId/status', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const { appointmentId } = req.params;
     const { status } = req.body;
@@ -633,7 +610,6 @@ app.put('/api/employee/appointments/:appointmentId/status', authenticateToken, a
     }
 });
 
-// Reschedule appointment
 app.put('/api/employee/appointments/:appointmentId/reschedule', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const { appointmentId } = req.params;
     const { appointment_date, appointment_time } = req.body;
@@ -649,7 +625,6 @@ app.put('/api/employee/appointments/:appointmentId/reschedule', authenticateToke
     }
 });
 
-// Get employee salary
 app.get('/api/employee/salary/:employeeId', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const { employeeId } = req.params;
 
@@ -661,7 +636,6 @@ app.get('/api/employee/salary/:employeeId', authenticateToken, authorizeRoles('E
     }
 });
 
-// Download salary CSV
 app.get('/api/employee/download-salary/:employeeId', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const { employeeId } = req.params;
 
@@ -681,7 +655,6 @@ app.get('/api/employee/download-salary/:employeeId', authenticateToken, authoriz
     }
 });
 
-// Send complaint
 app.post('/api/employee/complaint', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const { subject, message } = req.body;
     const userId = req.user.userId;
@@ -697,7 +670,6 @@ app.post('/api/employee/complaint', authenticateToken, authorizeRoles('EMPLOYEE'
     }
 });
 
-// Get my complaints
 app.get('/api/employee/my-complaints', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const userId = req.user.userId;
 
@@ -711,7 +683,6 @@ app.get('/api/employee/my-complaints', authenticateToken, authorizeRoles('EMPLOY
 
 // ============ CUSTOMER ENDPOINTS ============
 
-// Book appointment
 app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOMER'), async (req, res) => {
     const { custom_service, appointment_date, appointment_time, payment_method, amount } = req.body;
     const userId = req.user.userId;
@@ -747,7 +718,6 @@ app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOM
     }
 });
 
-// Get my appointments
 app.get('/api/customer/my-appointments/:userId', authenticateToken, authorizeRoles('CUSTOMER'), async (req, res) => {
     const { userId } = req.params;
 
@@ -771,7 +741,6 @@ app.get('/api/customer/my-appointments/:userId', authenticateToken, authorizeRol
     }
 });
 
-// Download receipt
 app.get('/api/customer/download-receipt/:appointmentId', authenticateToken, authorizeRoles('CUSTOMER'), async (req, res) => {
     const { appointmentId } = req.params;
 
@@ -799,7 +768,6 @@ app.get('/api/customer/download-receipt/:appointmentId', authenticateToken, auth
     }
 });
 
-// Send complaint
 app.post('/api/customer/complaint', authenticateToken, authorizeRoles('CUSTOMER'), async (req, res) => {
     const { subject, message } = req.body;
     const userId = req.user.userId;
@@ -813,7 +781,6 @@ app.post('/api/customer/complaint', authenticateToken, authorizeRoles('CUSTOMER'
     }
 });
 
-// Get my complaints
 app.get('/api/customer/my-complaints/:userId', authenticateToken, authorizeRoles('CUSTOMER'), async (req, res) => {
     const { userId } = req.params;
 
@@ -831,5 +798,5 @@ app.listen(PORT, () => {
     console.log(`🚀 Backend running on http://localhost:${PORT}`);
     console.log(`📊 Database: ${DB_NAME}`);
     console.log(`🔐 JWT Secret: ${JWT_SECRET ? 'Set' : 'Using default'}`);
-    console.log(`🌐 CORS enabled for Vercel frontend`);
+    console.log(`🌐 CORS enabled for all Vercel frontend URLs`);
 });
