@@ -91,7 +91,7 @@ app.post('/api/auth/login', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Login failed' }); }
 });
 
-// ============ OWNER DASHBOARD ============
+// ============ OWNER DASHBOARD - REAL DATA ============
 app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [revenueResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
@@ -99,14 +99,14 @@ app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), asyn
         const [customersResult] = await promiseDb.query('SELECT COUNT(*) as count FROM customers');
         
         res.json({ 
-            totalRevenue: revenueResult[0]?.total || 45800, 
-            totalExpenses: expensesResult[0]?.total || 18900, 
-            netProfit: (revenueResult[0]?.total || 45800) - (expensesResult[0]?.total || 18900), 
-            totalCustomers: customersResult[0]?.count || 5 
+            totalRevenue: revenueResult[0]?.total || 0, 
+            totalExpenses: expensesResult[0]?.total || 0, 
+            netProfit: (revenueResult[0]?.total || 0) - (expensesResult[0]?.total || 0), 
+            totalCustomers: customersResult[0]?.count || 0 
         });
     } catch (error) { 
         console.error('Dashboard error:', error);
-        res.json({ totalRevenue: 45800, totalExpenses: 18900, netProfit: 26900, totalCustomers: 5 });
+        res.status(500).json({ error: 'Failed to fetch dashboard data' });
     }
 });
 
@@ -168,33 +168,60 @@ app.delete('/api/owner/reject-employee/:userId', authenticateToken, authorizeRol
     }
 });
 
-// ============ CHART DATA - FIXED WITH SAMPLE DATA ============
+// ============ CHART DATA - REAL DATA FROM DATABASE ============
 app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
-    // Sample data that will always work
-    const monthlyRevenue = [
-        { month: 'Jan', revenue: 12500 }, { month: 'Feb', revenue: 14800 },
-        { month: 'Mar', revenue: 16200 }, { month: 'Apr', revenue: 18900 },
-        { month: 'May', revenue: 21500 }, { month: 'Jun', revenue: 24200 },
-        { month: 'Jul', revenue: 26800 }, { month: 'Aug', revenue: 29100 },
-        { month: 'Sep', revenue: 31500 }, { month: 'Oct', revenue: 34200 },
-        { month: 'Nov', revenue: 36800 }, { month: 'Dec', revenue: 39500 }
-    ];
+    try {
+        // Get monthly revenue from payments table
+        let [monthlyRevenue] = await promiseDb.query(`
+            SELECT 
+                DATE_FORMAT(payment_date, '%b') as month,
+                MONTH(payment_date) as month_num,
+                COALESCE(SUM(amount), 0) as revenue
+            FROM payments
+            WHERE payment_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+            GROUP BY MONTH(payment_date)
+            ORDER BY month_num ASC
+        `);
 
-    const categoryExpenses = [
-        { category: 'Salary', total: 12400 },
-        { category: 'Rent', total: 15000 },
-        { category: 'Equipment', total: 8000 },
-        { category: 'Supplies', total: 5000 },
-        { category: 'Other', total: 3000 }
-    ];
+        if (!monthlyRevenue || monthlyRevenue.length === 0) {
+            monthlyRevenue = [
+                { month: 'Jan', revenue: 0 }, { month: 'Feb', revenue: 0 },
+                { month: 'Mar', revenue: 0 }, { month: 'Apr', revenue: 0 },
+                { month: 'May', revenue: 0 }, { month: 'Jun', revenue: 0 },
+                { month: 'Jul', revenue: 0 }, { month: 'Aug', revenue: 0 },
+                { month: 'Sep', revenue: 0 }, { month: 'Oct', revenue: 0 },
+                { month: 'Nov', revenue: 0 }, { month: 'Dec', revenue: 0 }
+            ];
+        }
 
-    res.json({
-        monthlyRevenue: monthlyRevenue,
-        revenueTotal: 325000,
-        expensesTotal: 43400,
-        salariesTotal: 12400,
-        categoryExpenses: categoryExpenses
-    });
+        // Get total revenue from payments
+        const [revenueTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
+        
+        // Get total expenses from expenses table
+        const [expensesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
+        
+        // Get salaries total from expenses where category is Salary
+        const [salariesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE category = "Salary"');
+        
+        // Get category expenses for pie chart
+        const [categoryExpenses] = await promiseDb.query(`
+            SELECT category, SUM(amount) as total 
+            FROM expenses 
+            GROUP BY category
+            ORDER BY total DESC
+        `);
+
+        res.json({
+            monthlyRevenue: monthlyRevenue,
+            revenueTotal: revenueTotal[0]?.total || 0,
+            expensesTotal: expensesTotal[0]?.total || 0,
+            salariesTotal: salariesTotal[0]?.total || 0,
+            categoryExpenses: categoryExpenses || []
+        });
+    } catch (error) {
+        console.error('Chart data error:', error);
+        res.status(500).json({ error: 'Failed to fetch chart data' });
+    }
 });
 
 // ============ INCOME MANAGEMENT ============
