@@ -7,7 +7,7 @@ dotenv.config();
 
 const app = express();
 
-// ============ CORS CONFIGURATION ============
+// CORS
 app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (origin && origin.includes('vercel.app')) {
@@ -26,7 +26,7 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// ============ DATABASE CONNECTION ============
+// Database
 const DB_HOST = process.env.DB_HOST || 'localhost';
 const DB_USER = process.env.DB_USER || 'root';
 const DB_PASSWORD = process.env.DB_PASSWORD || '';
@@ -52,12 +52,12 @@ const JWT_SECRET = process.env.JWT_SECRET || 'levis_barber_secret_key_2026';
 
 console.log('✅ Database connected');
 
-// ============ TEST ENDPOINTS ============
+// Test
 app.get('/api/ping', (req, res) => {
     res.json({ message: 'Backend is alive!', timestamp: new Date().toISOString() });
 });
 
-// ============ MIDDLEWARE ============
+// Middleware
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -78,7 +78,7 @@ const authorizeRoles = (...roles) => {
     };
 };
 
-// ============ AUTH ENDPOINTS ============
+// Login
 app.post('/api/auth/login', async (req, res) => {
     const { username, password } = req.body;
     try {
@@ -91,7 +91,7 @@ app.post('/api/auth/login', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Login failed' }); }
 });
 
-// ============ OWNER DASHBOARD - REAL DATA ============
+// ============ DASHBOARD - FETCH FROM DATABASE ============
 app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [revenueResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
@@ -110,6 +110,169 @@ app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), asyn
     }
 });
 
+// ============ CHART DATA - FETCH FROM DATABASE ============
+app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    try {
+        // Monthly revenue from payments table
+        const [monthlyRevenue] = await promiseDb.query(`
+            SELECT 
+                DATE_FORMAT(payment_date, '%b') as month,
+                MONTH(payment_date) as month_num,
+                COALESCE(SUM(amount), 0) as revenue
+            FROM payments
+            WHERE payment_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+            GROUP BY MONTH(payment_date)
+            ORDER BY month_num ASC
+        `);
+
+        // Total revenue
+        const [revenueTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
+        
+        // Total expenses
+        const [expensesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
+        
+        // Salaries total
+        const [salariesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE category = "Salary"');
+        
+        // Category expenses for pie chart
+        const [categoryExpenses] = await promiseDb.query(`
+            SELECT category, SUM(amount) as total 
+            FROM expenses 
+            WHERE category IS NOT NULL AND category != ''
+            GROUP BY category
+            ORDER BY total DESC
+        `);
+
+        res.json({
+            monthlyRevenue: monthlyRevenue || [],
+            revenueTotal: revenueTotal[0]?.total || 0,
+            expensesTotal: expensesTotal[0]?.total || 0,
+            salariesTotal: salariesTotal[0]?.total || 0,
+            categoryExpenses: categoryExpenses || []
+        });
+    } catch (error) {
+        console.error('Chart data error:', error);
+        res.status(500).json({ error: 'Failed to fetch chart data' });
+    }
+});
+
+// ============ INCOME MANAGEMENT (Manual Entry) ============
+app.get('/api/owner/income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    try {
+        const [income] = await promiseDb.query(`
+            SELECT income_id as id, source, amount, description, category, payment_method, income_date as date, created_at 
+            FROM income 
+            ORDER BY income_date DESC
+        `);
+        res.json(income);
+    } catch (error) { 
+        console.error('Fetch income error:', error);
+        res.json([]);
+    }
+});
+
+app.post('/api/owner/add-income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    const { source, amount, description, category, payment_method, income_date } = req.body;
+    
+    if (!source || !amount || amount <= 0) {
+        return res.status(400).json({ error: 'Source and valid amount required' });
+    }
+    
+    try {
+        const date = income_date || new Date().toISOString().split('T')[0];
+        
+        // Insert into income table
+        await promiseDb.query(
+            `INSERT INTO income (source, amount, description, category, payment_method, income_date) 
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [source, amount, description || null, category || 'Other', payment_method || 'CASH', date]
+        );
+        
+        // Also insert into payments for revenue calculation
+        await promiseDb.query(
+            `INSERT INTO payments (appointment_id, amount, payment_method, source, source_type, payment_date) 
+             VALUES (NULL, ?, ?, ?, 'Manual Income', ?)`,
+            [amount, payment_method || 'CASH', source, date]
+        );
+        
+        res.json({ success: true, message: 'Income added successfully' });
+    } catch (error) { 
+        console.error('Add income error:', error);
+        res.status(500).json({ error: 'Failed to add income' });
+    }
+});
+
+app.delete('/api/owner/delete-income/:id', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Get the amount to remove from payments
+        const [incomeRecord] = await promiseDb.query('SELECT amount, source, income_date FROM income WHERE income_id = ?', [id]);
+        
+        if (incomeRecord.length > 0) {
+            // Delete from payments as well
+            await promiseDb.query(
+                'DELETE FROM payments WHERE source = ? AND payment_date = ? AND source_type = "Manual Income"',
+                [incomeRecord[0].source, incomeRecord[0].income_date]
+            );
+        }
+        
+        await promiseDb.query('DELETE FROM income WHERE income_id = ?', [id]);
+        res.json({ success: true });
+    } catch (error) { 
+        console.error('Delete income error:', error);
+        res.status(500).json({ error: 'Failed to delete income' });
+    }
+});
+
+// ============ EXPENSE MANAGEMENT (Manual Entry) ============
+app.get('/api/owner/expenses', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    try {
+        const [expenses] = await promiseDb.query(`
+            SELECT expense_id as id, description, amount, category, expense_date as date, created_at 
+            FROM expenses 
+            ORDER BY expense_date DESC
+        `);
+        res.json(expenses);
+    } catch (error) { 
+        console.error('Fetch expenses error:', error);
+        res.json([]);
+    }
+});
+
+app.post('/api/owner/add-expense', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    const { description, amount, category, expense_date } = req.body;
+    
+    if (!description || !amount || amount <= 0) {
+        return res.status(400).json({ error: 'Description and valid amount required' });
+    }
+    
+    try {
+        const date = expense_date || new Date().toISOString().split('T')[0];
+        
+        await promiseDb.query(
+            `INSERT INTO expenses (description, amount, category, expense_date) 
+             VALUES (?, ?, ?, ?)`,
+            [description, amount, category || 'Other', date]
+        );
+        
+        res.json({ success: true, message: 'Expense added successfully' });
+    } catch (error) { 
+        console.error('Add expense error:', error);
+        res.status(500).json({ error: 'Failed to add expense' });
+    }
+});
+
+app.delete('/api/owner/delete-expense/:id', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    const { id } = req.params;
+    try {
+        await promiseDb.query('DELETE FROM expenses WHERE expense_id = ?', [id]);
+        res.json({ success: true });
+    } catch (error) { 
+        console.error('Delete expense error:', error);
+        res.status(500).json({ error: 'Failed to delete expense' });
+    }
+});
+
 // ============ PENDING EMPLOYEES ============
 app.get('/api/owner/pending-employees', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
@@ -125,7 +288,6 @@ app.get('/api/owner/pending-employees', authenticateToken, authorizeRoles('OWNER
     }
 });
 
-// ============ APPROVE EMPLOYEE ============
 app.post('/api/owner/approve-employee/:userId', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { userId } = req.params;
     const { position, salary, phone, hire_date } = req.body;
@@ -142,14 +304,12 @@ app.post('/api/owner/approve-employee/:userId', authenticateToken, authorizeRole
             [users[0].full_name, phone || null, position || 'Barber', salary || 0, hire_date || new Date(), userId]
         );
 
-        res.json({ success: true, message: 'Employee approved successfully' });
+        res.json({ success: true });
     } catch (error) {
-        console.error(error);
         res.status(500).json({ error: 'Failed to approve employee' });
     }
 });
 
-// ============ REJECT EMPLOYEE ============
 app.delete('/api/owner/reject-employee/:userId', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { userId } = req.params;
 
@@ -161,131 +321,13 @@ app.delete('/api/owner/reject-employee/:userId', authenticateToken, authorizeRol
 
         await promiseDb.query('DELETE FROM users WHERE user_id = ?', [userId]);
         
-        res.json({ success: true, message: 'Employee registration rejected' });
+        res.json({ success: true });
     } catch (error) {
-        console.error(error);
         res.status(500).json({ error: 'Failed to reject employee' });
     }
 });
 
-// ============ CHART DATA - REAL DATA FROM DATABASE ============
-app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
-    try {
-        // Get monthly revenue from payments table
-        let [monthlyRevenue] = await promiseDb.query(`
-            SELECT 
-                DATE_FORMAT(payment_date, '%b') as month,
-                MONTH(payment_date) as month_num,
-                COALESCE(SUM(amount), 0) as revenue
-            FROM payments
-            WHERE payment_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
-            GROUP BY MONTH(payment_date)
-            ORDER BY month_num ASC
-        `);
-
-        if (!monthlyRevenue || monthlyRevenue.length === 0) {
-            monthlyRevenue = [
-                { month: 'Jan', revenue: 0 }, { month: 'Feb', revenue: 0 },
-                { month: 'Mar', revenue: 0 }, { month: 'Apr', revenue: 0 },
-                { month: 'May', revenue: 0 }, { month: 'Jun', revenue: 0 },
-                { month: 'Jul', revenue: 0 }, { month: 'Aug', revenue: 0 },
-                { month: 'Sep', revenue: 0 }, { month: 'Oct', revenue: 0 },
-                { month: 'Nov', revenue: 0 }, { month: 'Dec', revenue: 0 }
-            ];
-        }
-
-        // Get total revenue from payments
-        const [revenueTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
-        
-        // Get total expenses from expenses table
-        const [expensesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
-        
-        // Get salaries total from expenses where category is Salary
-        const [salariesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE category = "Salary"');
-        
-        // Get category expenses for pie chart
-        const [categoryExpenses] = await promiseDb.query(`
-            SELECT category, SUM(amount) as total 
-            FROM expenses 
-            GROUP BY category
-            ORDER BY total DESC
-        `);
-
-        res.json({
-            monthlyRevenue: monthlyRevenue,
-            revenueTotal: revenueTotal[0]?.total || 0,
-            expensesTotal: expensesTotal[0]?.total || 0,
-            salariesTotal: salariesTotal[0]?.total || 0,
-            categoryExpenses: categoryExpenses || []
-        });
-    } catch (error) {
-        console.error('Chart data error:', error);
-        res.status(500).json({ error: 'Failed to fetch chart data' });
-    }
-});
-
-// ============ INCOME MANAGEMENT ============
-app.get('/api/owner/income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
-    try {
-        const [income] = await promiseDb.query('SELECT income_id as id, source, amount, description, category, payment_method, income_date as date, created_at FROM income ORDER BY income_date DESC');
-        res.json(income);
-    } catch (error) { 
-        res.json([]);
-    }
-});
-
-app.post('/api/owner/add-income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
-    const { source, amount, description, category, payment_method, income_date } = req.body;
-    if (!source || !amount || amount <= 0) return res.status(400).json({ error: 'Source and valid amount required' });
-    try {
-        const date = income_date || new Date().toISOString().split('T')[0];
-        await promiseDb.query('INSERT INTO income (source, amount, description, category, payment_method, income_date) VALUES (?, ?, ?, ?, ?, ?)', [source, amount, description || null, category || 'Other', payment_method || 'CASH', date]);
-        await promiseDb.query('INSERT INTO payments (appointment_id, amount, payment_method, source, source_type, payment_date) VALUES (NULL, ?, ?, ?, "Manual Income", ?)', [amount, payment_method || 'CASH', source, date]);
-        res.json({ success: true, message: 'Income added successfully' });
-    } catch (error) { 
-        res.status(500).json({ error: 'Failed to add income' }); 
-    }
-});
-
-app.delete('/api/owner/delete-income/:id', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
-    const { id } = req.params;
-    try {
-        await promiseDb.query('DELETE FROM income WHERE income_id = ?', [id]);
-        res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: 'Failed to delete income' }); }
-});
-
-// ============ EXPENSE MANAGEMENT ============
-app.get('/api/owner/expenses', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
-    try {
-        const [expenses] = await promiseDb.query('SELECT expense_id as id, description, amount, category, expense_date as date, created_at FROM expenses ORDER BY expense_date DESC');
-        res.json(expenses);
-    } catch (error) { 
-        res.json([]);
-    }
-});
-
-app.post('/api/owner/add-expense', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
-    const { description, amount, category, expense_date } = req.body;
-    if (!description || !amount || amount <= 0) return res.status(400).json({ error: 'Description and valid amount required' });
-    try {
-        const date = expense_date || new Date().toISOString().split('T')[0];
-        await promiseDb.query('INSERT INTO expenses (description, amount, category, expense_date) VALUES (?, ?, ?, ?)', [description, amount, category || 'Other', date]);
-        res.json({ success: true, message: 'Expense added successfully' });
-    } catch (error) { 
-        res.status(500).json({ error: 'Failed to add expense' }); 
-    }
-});
-
-app.delete('/api/owner/delete-expense/:id', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
-    const { id } = req.params;
-    try {
-        await promiseDb.query('DELETE FROM expenses WHERE expense_id = ?', [id]);
-        res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: 'Failed to delete expense' }); }
-});
-
-// ============ EMPLOYEE MANAGEMENT ============
+// ============ EMPLOYEES ============
 app.get('/api/owner/employees', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [employees] = await promiseDb.query('SELECT employee_id, full_name, position, salary FROM employees');
@@ -300,17 +342,25 @@ app.post('/api/owner/pay-salary', authenticateToken, authorizeRoles('OWNER'), as
     try {
         const [emp] = await promiseDb.query('SELECT full_name FROM employees WHERE employee_id = ?', [employee_id]);
         await promiseDb.query('UPDATE employees SET salary = ? WHERE employee_id = ?', [amount, employee_id]);
-        await promiseDb.query('INSERT INTO expenses (description, amount, category, expense_date) VALUES (?, ?, "Salary", CURDATE())', [`Salary payment to ${emp[0].full_name}`, amount]);
+        await promiseDb.query(
+            'INSERT INTO expenses (description, amount, category, expense_date) VALUES (?, ?, "Salary", CURDATE())',
+            [`Salary payment to ${emp[0].full_name}`, amount]
+        );
         res.json({ success: true });
     } catch (error) { 
-        res.status(500).json({ error: 'Failed to pay salary' }); 
+        res.status(500).json({ error: 'Failed to pay salary' });
     }
 });
 
 // ============ COMPLAINTS ============
 app.get('/api/owner/complaints', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
-        const [complaints] = await promiseDb.query('SELECT c.*, u.full_name as sender_name FROM complaints c JOIN users u ON c.user_id = u.user_id ORDER BY c.created_at DESC');
+        const [complaints] = await promiseDb.query(`
+            SELECT c.*, u.full_name as sender_name 
+            FROM complaints c 
+            JOIN users u ON c.user_id = u.user_id 
+            ORDER BY c.created_at DESC
+        `);
         res.json(complaints);
     } catch (error) { 
         res.json([]);
@@ -324,7 +374,7 @@ app.post('/api/owner/reply-complaint/:id', authenticateToken, authorizeRoles('OW
         await promiseDb.query('UPDATE complaints SET reply = ?, status = "RESOLVED" WHERE complaint_id = ?', [reply, id]);
         res.json({ success: true });
     } catch (error) { 
-        res.status(500).json({ error: 'Failed to reply' }); 
+        res.status(500).json({ error: 'Failed to reply' });
     }
 });
 
@@ -353,7 +403,7 @@ app.put('/api/employee/appointments/:appointmentId/status', authenticateToken, a
         await promiseDb.query('UPDATE appointments SET status = ? WHERE appointment_id = ?', [status, appointmentId]);
         res.json({ success: true });
     } catch (error) { 
-        res.status(500).json({ error: 'Failed to update status' }); 
+        res.status(500).json({ error: 'Failed to update status' });
     }
 });
 
@@ -364,7 +414,7 @@ app.put('/api/employee/appointments/:appointmentId/reschedule', authenticateToke
         await promiseDb.query('UPDATE appointments SET appointment_date = ?, appointment_time = ? WHERE appointment_id = ?', [appointment_date, appointment_time, appointmentId]);
         res.json({ success: true });
     } catch (error) { 
-        res.status(500).json({ error: 'Failed to reschedule' }); 
+        res.status(500).json({ error: 'Failed to reschedule' });
     }
 });
 
@@ -374,7 +424,7 @@ app.get('/api/employee/salary/:employeeId', authenticateToken, authorizeRoles('E
         const [salary] = await promiseDb.query('SELECT salary FROM employees WHERE employee_id = ?', [employeeId]);
         res.json({ salary: salary[0]?.salary || 0 });
     } catch (error) { 
-        res.json({ salary: 0 }); 
+        res.json({ salary: 0 });
     }
 });
 
@@ -387,7 +437,7 @@ app.get('/api/employee/download-salary/:employeeId', authenticateToken, authoriz
         res.setHeader('Content-Disposition', `attachment; filename=salary_${employeeId}.csv`);
         res.send(csv);
     } catch (error) { 
-        res.status(500).json({ error: 'Failed to download salary' }); 
+        res.status(500).json({ error: 'Failed to download salary' });
     }
 });
 
@@ -398,7 +448,7 @@ app.post('/api/employee/complaint', authenticateToken, authorizeRoles('EMPLOYEE'
         await promiseDb.query('INSERT INTO complaints (user_id, role, subject, message) VALUES (?, "EMPLOYEE", ?, ?)', [userId, subject, message]);
         res.json({ success: true });
     } catch (error) { 
-        res.status(500).json({ error: 'Failed to send complaint' }); 
+        res.status(500).json({ error: 'Failed to send complaint' });
     }
 });
 
@@ -421,11 +471,14 @@ app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOM
         if (customer.length === 0) return res.status(404).json({ error: 'Customer profile not found' });
         const [barber] = await promiseDb.query('SELECT e.employee_id FROM employees e JOIN users u ON e.user_id = u.user_id WHERE u.is_approved = 1 LIMIT 1');
         if (barber.length === 0) return res.status(404).json({ error: 'No barbers available' });
-        const [appointment] = await promiseDb.query('INSERT INTO appointments (customer_id, employee_id, custom_service, appointment_date, appointment_time, payment_status) VALUES (?, ?, ?, ?, ?, "PAID")', [customer[0].customer_id, barber[0].employee_id, custom_service, appointment_date, appointment_time]);
+        const [appointment] = await promiseDb.query(
+            'INSERT INTO appointments (customer_id, employee_id, custom_service, appointment_date, appointment_time, payment_status) VALUES (?, ?, ?, ?, ?, "PAID")',
+            [customer[0].customer_id, barber[0].employee_id, custom_service, appointment_date, appointment_time]
+        );
         await promiseDb.query('INSERT INTO payments (appointment_id, amount, payment_method) VALUES (?, ?, ?)', [appointment.insertId, amount, payment_method || 'CASH']);
         res.status(201).json({ success: true, message: 'Appointment booked successfully', appointmentId: appointment.insertId });
     } catch (error) { 
-        res.status(500).json({ error: 'Failed to book appointment' }); 
+        res.status(500).json({ error: 'Failed to book appointment' });
     }
 });
 
@@ -463,7 +516,7 @@ app.get('/api/customer/download-receipt/:appointmentId', authenticateToken, auth
         res.setHeader('Content-Disposition', `attachment; filename=receipt_${appointmentId}.csv`);
         res.send(csv);
     } catch (error) { 
-        res.status(500).json({ error: 'Failed to download receipt' }); 
+        res.status(500).json({ error: 'Failed to download receipt' });
     }
 });
 
@@ -474,7 +527,7 @@ app.post('/api/customer/complaint', authenticateToken, authorizeRoles('CUSTOMER'
         await promiseDb.query('INSERT INTO complaints (user_id, role, subject, message) VALUES (?, "CUSTOMER", ?, ?)', [userId, subject, message]);
         res.json({ success: true });
     } catch (error) { 
-        res.status(500).json({ error: 'Failed to send complaint' }); 
+        res.status(500).json({ error: 'Failed to send complaint' });
     }
 });
 
@@ -488,7 +541,7 @@ app.get('/api/customer/my-complaints/:userId', authenticateToken, authorizeRoles
     }
 });
 
-// ============ START SERVER ============
+// Start server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
     console.log(`🚀 Backend running on port ${PORT}`);
