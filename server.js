@@ -97,26 +97,136 @@ app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), asyn
         const [revenueResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
         const [expensesResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
         const [customersResult] = await promiseDb.query('SELECT COUNT(*) as count FROM customers');
-        res.json({ totalRevenue: revenueResult[0].total || 0, totalExpenses: expensesResult[0].total || 0, netProfit: (revenueResult[0].total || 0) - (expensesResult[0].total || 0), totalCustomers: customersResult[0].count || 0 });
-    } catch (error) { res.status(500).json({ error: 'Failed to fetch dashboard data' }); }
+        res.json({ 
+            totalRevenue: revenueResult[0].total || 0, 
+            totalExpenses: expensesResult[0].total || 0, 
+            netProfit: (revenueResult[0].total || 0) - (expensesResult[0].total || 0), 
+            totalCustomers: customersResult[0].count || 0 
+        });
+    } catch (error) { 
+        console.error('Dashboard error:', error);
+        res.status(500).json({ error: 'Failed to fetch dashboard data' }); 
+    }
+});
+
+// ============ PENDING EMPLOYEES ============
+app.get('/api/owner/pending-employees', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    try {
+        const [employees] = await promiseDb.query(`
+            SELECT user_id, full_name, username, created_at 
+            FROM users 
+            WHERE role = 'EMPLOYEE' AND is_approved = 0
+            ORDER BY created_at ASC
+        `);
+        console.log(`Found ${employees.length} pending employees`);
+        res.json(employees);
+    } catch (error) {
+        console.error('Error fetching pending employees:', error);
+        res.status(500).json({ error: 'Failed to fetch pending employees' });
+    }
+});
+
+// ============ APPROVE EMPLOYEE ============
+app.post('/api/owner/approve-employee/:userId', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    const { userId } = req.params;
+    const { position, salary, phone, hire_date } = req.body;
+
+    try {
+        const [users] = await promiseDb.query('SELECT full_name FROM users WHERE user_id = ? AND role = "EMPLOYEE"', [userId]);
+        if (users.length === 0) {
+            return res.status(404).json({ error: 'Employee not found' });
+        }
+
+        await promiseDb.query('UPDATE users SET is_approved = 1 WHERE user_id = ?', [userId]);
+        await promiseDb.query(
+            'INSERT INTO employees (full_name, phone, position, salary, hire_date, user_id) VALUES (?, ?, ?, ?, ?, ?)',
+            [users[0].full_name, phone || null, position || 'Barber', salary || 0, hire_date || new Date(), userId]
+        );
+
+        res.json({ success: true, message: 'Employee approved successfully' });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to approve employee' });
+    }
+});
+
+// ============ REJECT EMPLOYEE ============
+app.delete('/api/owner/reject-employee/:userId', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    const { userId } = req.params;
+
+    try {
+        const [users] = await promiseDb.query('SELECT user_id FROM users WHERE user_id = ? AND role = "EMPLOYEE" AND is_approved = 0', [userId]);
+        if (users.length === 0) {
+            return res.status(404).json({ error: 'Pending employee not found' });
+        }
+
+        await promiseDb.query('DELETE FROM users WHERE user_id = ?', [userId]);
+        
+        res.json({ success: true, message: 'Employee registration rejected' });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to reject employee' });
+    }
 });
 
 // ============ CHART DATA ============
 app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
+        // Monthly revenue from payments
         let [monthlyRevenue] = await promiseDb.query(`
-            SELECT DATE_FORMAT(payment_date, '%b') as month, MONTH(payment_date) as month_num, COALESCE(SUM(amount), 0) as revenue
-            FROM payments WHERE payment_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
-            GROUP BY MONTH(payment_date) ORDER BY month_num ASC`);
-        if (!monthlyRevenue.length) {
-            monthlyRevenue = [{ month: 'Jan', revenue: 0 }, { month: 'Feb', revenue: 0 }, { month: 'Mar', revenue: 0 }, { month: 'Apr', revenue: 0 }, { month: 'May', revenue: 0 }, { month: 'Jun', revenue: 0 }, { month: 'Jul', revenue: 0 }, { month: 'Aug', revenue: 0 }, { month: 'Sep', revenue: 0 }, { month: 'Oct', revenue: 0 }, { month: 'Nov', revenue: 0 }, { month: 'Dec', revenue: 0 }];
+            SELECT 
+                DATE_FORMAT(payment_date, '%b') as month,
+                MONTH(payment_date) as month_num,
+                COALESCE(SUM(amount), 0) as revenue
+            FROM payments
+            WHERE payment_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+            GROUP BY MONTH(payment_date)
+            ORDER BY month_num ASC
+        `);
+
+        if (!monthlyRevenue || monthlyRevenue.length === 0) {
+            monthlyRevenue = [
+                { month: 'Jan', revenue: 0 }, { month: 'Feb', revenue: 0 },
+                { month: 'Mar', revenue: 0 }, { month: 'Apr', revenue: 0 },
+                { month: 'May', revenue: 0 }, { month: 'Jun', revenue: 0 },
+                { month: 'Jul', revenue: 0 }, { month: 'Aug', revenue: 0 },
+                { month: 'Sep', revenue: 0 }, { month: 'Oct', revenue: 0 },
+                { month: 'Nov', revenue: 0 }, { month: 'Dec', revenue: 0 }
+            ];
         }
+
+        // Total revenue from payments
         const [revenueTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
+        
+        // Total expenses
         const [expensesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
+        
+        // Salaries total
         const [salariesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE category = "Salary"');
-        const [categoryExpenses] = await promiseDb.query('SELECT category, SUM(amount) as total FROM expenses GROUP BY category');
-        res.json({ monthlyRevenue: monthlyRevenue, revenueTotal: revenueTotal[0]?.total || 0, expensesTotal: expensesTotal[0]?.total || 0, salariesTotal: salariesTotal[0]?.total || 0, categoryExpenses: categoryExpenses || [] });
-    } catch (error) { res.status(500).json({ error: 'Failed to fetch chart data' }); }
+        
+        // Category expenses for pie chart
+        const [categoryExpenses] = await promiseDb.query(`
+            SELECT category, SUM(amount) as total 
+            FROM expenses 
+            GROUP BY category
+            ORDER BY total DESC
+        `);
+
+        console.log('Chart Data - Revenue Total:', revenueTotal[0]?.total);
+        console.log('Chart Data - Expenses Total:', expensesTotal[0]?.total);
+        console.log('Chart Data - Category Expenses:', categoryExpenses);
+
+        res.json({
+            monthlyRevenue: monthlyRevenue,
+            revenueTotal: revenueTotal[0]?.total || 0,
+            expensesTotal: expensesTotal[0]?.total || 0,
+            salariesTotal: salariesTotal[0]?.total || 0,
+            categoryExpenses: categoryExpenses || []
+        });
+    } catch (error) {
+        console.error('Chart data error:', error);
+        res.status(500).json({ error: 'Failed to fetch chart data', details: error.message });
+    }
 });
 
 // ============ INCOME MANAGEMENT (Manual Entry) ============
@@ -188,6 +298,23 @@ app.post('/api/owner/pay-salary', authenticateToken, authorizeRoles('OWNER'), as
         await promiseDb.query('INSERT INTO expenses (description, amount, category, expense_date) VALUES (?, ?, "Salary", CURDATE())', [`Salary payment to ${emp[0].full_name}`, amount]);
         res.json({ success: true });
     } catch (error) { res.status(500).json({ error: 'Failed to pay salary' }); }
+});
+
+// ============ COMPLAINTS (Owner) ============
+app.get('/api/owner/complaints', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    try {
+        const [complaints] = await promiseDb.query('SELECT c.*, u.full_name as sender_name FROM complaints c JOIN users u ON c.user_id = u.user_id ORDER BY c.created_at DESC');
+        res.json(complaints);
+    } catch (error) { res.status(500).json({ error: 'Failed to fetch complaints' }); }
+});
+
+app.post('/api/owner/reply-complaint/:id', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    const { id } = req.params;
+    const { reply } = req.body;
+    try {
+        await promiseDb.query('UPDATE complaints SET reply = ?, status = "RESOLVED" WHERE complaint_id = ?', [reply, id]);
+        res.json({ success: true });
+    } catch (error) { res.status(500).json({ error: 'Failed to reply' }); }
 });
 
 // ============ EMPLOYEE ENDPOINTS ============
@@ -326,26 +453,10 @@ app.get('/api/customer/my-complaints/:userId', authenticateToken, authorizeRoles
     } catch (error) { res.json([]); }
 });
 
-// ============ COMPLAINTS (Owner) ============
-app.get('/api/owner/complaints', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
-    try {
-        const [complaints] = await promiseDb.query('SELECT c.*, u.full_name as sender_name FROM complaints c JOIN users u ON c.user_id = u.user_id ORDER BY c.created_at DESC');
-        res.json(complaints);
-    } catch (error) { res.status(500).json({ error: 'Failed to fetch complaints' }); }
-});
-
-app.post('/api/owner/reply-complaint/:id', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
-    const { id } = req.params;
-    const { reply } = req.body;
-    try {
-        await promiseDb.query('UPDATE complaints SET reply = ?, status = "RESOLVED" WHERE complaint_id = ?', [reply, id]);
-        res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: 'Failed to reply' }); }
-});
-
 // ============ START SERVER ============
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
     console.log(`🚀 Backend running on port ${PORT}`);
     console.log(`📊 Database: ${DB_NAME}`);
+    console.log(`🔐 JWT Secret: ${JWT_SECRET ? 'Set' : 'Using default'}`);
 });
