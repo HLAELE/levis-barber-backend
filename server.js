@@ -160,16 +160,19 @@ app.get('/api/test/users', async (req, res) => {
 // ============ OWNER DASHBOARD ============
 app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
-        const [revenueResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
+        const [paymentsResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
+        const [incomeResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM income');
         const [expensesResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
         const [customersResult] = await promiseDb.query('SELECT COUNT(*) as count FROM customers');
+        const totalRevenue = (paymentsResult[0].total || 0) + (incomeResult[0].total || 0);
         res.json({
-            totalRevenue: revenueResult[0].total || 0,
+            totalRevenue,
             totalExpenses: expensesResult[0].total || 0,
-            netProfit: (revenueResult[0].total || 0) - (expensesResult[0].total || 0),
+            netProfit: totalRevenue - (expensesResult[0].total || 0),
             totalCustomers: customersResult[0].count || 0
         });
     } catch (error) {
+        console.error('Dashboard error:', error);
         res.status(500).json({ error: 'Failed to fetch dashboard data' });
     }
 });
@@ -178,9 +181,14 @@ app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), asyn
 app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         let [monthlyRevenue] = await promiseDb.query(`
-            SELECT DATE_FORMAT(payment_date, '%b') as month, MONTH(payment_date) as month_num, COALESCE(SUM(amount), 0) as revenue
-            FROM payments WHERE payment_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
-            GROUP BY MONTH(payment_date) ORDER BY month_num ASC
+            SELECT month, month_num, COALESCE(SUM(amount), 0) as revenue FROM (
+                SELECT DATE_FORMAT(payment_date, '%b') as month, MONTH(payment_date) as month_num, amount
+                FROM payments WHERE payment_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+                UNION ALL
+                SELECT DATE_FORMAT(income_date, '%b') as month, MONTH(income_date) as month_num, amount
+                FROM income WHERE income_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+            ) as combined
+            GROUP BY month_num ORDER BY month_num ASC
         `);
         if (!monthlyRevenue || monthlyRevenue.length === 0) {
             monthlyRevenue = [
@@ -192,18 +200,20 @@ app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), asy
                 { month: 'Nov', revenue: 0 }, { month: 'Dec', revenue: 0 }
             ];
         }
-        const [revenueTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
+        const [paymentsTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
+        const [incomeTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM income');
         const [expensesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
         const [salariesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE category = "Salary"');
         const [categoryExpenses] = await promiseDb.query('SELECT category, COALESCE(SUM(amount), 0) as total FROM expenses GROUP BY category');
         res.json({
-            monthlyRevenue: monthlyRevenue,
-            revenueTotal: revenueTotal[0]?.total || 0,
+            monthlyRevenue,
+            revenueTotal: (paymentsTotal[0]?.total || 0) + (incomeTotal[0]?.total || 0),
             expensesTotal: expensesTotal[0]?.total || 0,
             salariesTotal: salariesTotal[0]?.total || 0,
             categoryExpenses: categoryExpenses || []
         });
     } catch (error) {
+        console.error('Chart data error:', error);
         res.status(500).json({ error: 'Failed to fetch chart data' });
     }
 });
@@ -294,12 +304,9 @@ app.post('/api/owner/add-income', authenticateToken, authorizeRoles('OWNER'), as
             'INSERT INTO income (source, amount, description, category, payment_method, income_date) VALUES (?, ?, ?, ?, ?, ?)',
             [source, amount, description || null, category || 'Other', payment_method || 'CASH', date]
         );
-        await promiseDb.query(
-            'INSERT INTO payments (appointment_id, amount, payment_method, source, source_type, payment_date) VALUES (NULL, ?, ?, ?, "Manual Income", ?)',
-            [amount, payment_method || 'CASH', source, date]
-        );
         res.json({ success: true, message: 'Income added successfully' });
     } catch (error) {
+        console.error('Add income error:', error);
         res.status(500).json({ error: 'Failed to add income' });
     }
 });
@@ -462,7 +469,7 @@ app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOM
             'INSERT INTO appointments (customer_id, employee_id, custom_service, appointment_date, appointment_time, payment_status) VALUES (?, ?, ?, ?, ?, "PAID")',
             [customer[0].customer_id, barber[0].employee_id, custom_service, appointment_date, appointment_time]
         );
-        await promiseDb.query('INSERT INTO payments (appointment_id, amount, payment_method) VALUES (?, ?, ?)', [appointment.insertId, amount, payment_method || 'CASH']);
+        await promiseDb.query('INSERT INTO payments (appointment_id, amount, payment_method, payment_date) VALUES (?, ?, ?, ?)', [appointment.insertId, amount, payment_method || 'CASH', appointment_date]);
         res.status(201).json({ success: true, message: 'Appointment booked successfully', appointmentId: appointment.insertId });
     } catch (error) { 
         res.status(500).json({ error: 'Failed to book appointment' }); 
