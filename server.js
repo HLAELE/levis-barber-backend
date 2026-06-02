@@ -199,7 +199,7 @@ app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), asy
         }
         const [paymentsTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
         const [expensesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
-        const [salariesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE category = "Salary"');
+        const [salariesTotal] = await promiseDb.query("SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE category = 'Salary'");
         const [categoryExpenses] = await promiseDb.query('SELECT category, COALESCE(SUM(amount), 0) as total FROM expenses GROUP BY category');
         
         const revenueTotal = parseFloat(paymentsTotal[0]?.total) || 0;
@@ -237,7 +237,7 @@ app.post('/api/owner/approve-employee/:userId', authenticateToken, authorizeRole
     const { userId } = req.params;
     const { position, salary, phone, hire_date } = req.body;
     try {
-        const [users] = await promiseDb.query('SELECT full_name FROM users WHERE user_id = ? AND role = "EMPLOYEE"', [userId]);
+        const [users] = await promiseDb.query("SELECT full_name FROM users WHERE user_id = ? AND role = 'EMPLOYEE'", [userId]);
         if (users.length === 0) return res.status(404).json({ error: 'Employee not found' });
         await promiseDb.query('UPDATE users SET is_approved = 1 WHERE user_id = ?', [userId]);
         await promiseDb.query(
@@ -254,7 +254,7 @@ app.post('/api/owner/approve-employee/:userId', authenticateToken, authorizeRole
 app.delete('/api/owner/reject-employee/:userId', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     const { userId } = req.params;
     try {
-        await promiseDb.query('DELETE FROM users WHERE user_id = ? AND role = "EMPLOYEE" AND is_approved = 0', [userId]);
+        await promiseDb.query("DELETE FROM users WHERE user_id = ? AND role = 'EMPLOYEE' AND is_approved = 0", [userId]);
         res.json({ success: true });
     } catch (error) {
         res.status(500).json({ error: 'Failed to reject employee' });
@@ -276,7 +276,7 @@ app.post('/api/owner/pay-salary', authenticateToken, authorizeRoles('OWNER'), as
         const [emp] = await promiseDb.query('SELECT full_name FROM employees WHERE employee_id = ?', [employee_id]);
         await promiseDb.query('UPDATE employees SET salary = ? WHERE employee_id = ?', [amount, employee_id]);
         await promiseDb.query(
-            'INSERT INTO expenses (description, amount, category, expense_date) VALUES (?, ?, "Salary", CURDATE())',
+            "INSERT INTO expenses (description, amount, category, expense_date) VALUES (?, ?, 'Salary', CURDATE())",
             [`Salary payment to ${emp[0].full_name}`, amount]
         );
         const currentMonth = new Date().getMonth() + 1;
@@ -399,7 +399,7 @@ app.post('/api/owner/reply-complaint/:id', authenticateToken, authorizeRoles('OW
     const { id } = req.params;
     const { reply } = req.body;
     try {
-        await promiseDb.query('UPDATE complaints SET reply = ?, status = "RESOLVED" WHERE complaint_id = ?', [reply, id]);
+        await promiseDb.query("UPDATE complaints SET reply = ?, status = 'RESOLVED' WHERE complaint_id = ?", [reply, id]);
         res.json({ success: true });
     } catch (error) {
         res.status(500).json({ error: 'Failed to reply' });
@@ -475,7 +475,7 @@ app.post('/api/employee/complaint', authenticateToken, authorizeRoles('EMPLOYEE'
     const { subject, message } = req.body;
     const userId = req.user.userId;
     try {
-        await promiseDb.query('INSERT INTO complaints (user_id, role, subject, message) VALUES (?, "EMPLOYEE", ?, ?)', [userId, subject, message]);
+        await promiseDb.query("INSERT INTO complaints (user_id, role, subject, message) VALUES (?, 'EMPLOYEE', ?, ?)", [userId, subject, message]);
         res.json({ success: true });
     } catch (error) { res.status(500).json({ error: 'Failed to send complaint' }); }
 });
@@ -500,7 +500,7 @@ app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOM
         `);
         if (barber.length === 0) return res.status(404).json({ error: 'No barbers available' });
         const [appointment] = await promiseDb.query(
-            'INSERT INTO appointments (customer_id, employee_id, notes, appointment_date, time_slot, status) VALUES (?, ?, ?, ?, ?, "PENDING")',
+            "INSERT INTO appointments (customer_id, employee_id, notes, appointment_date, time_slot, status) VALUES (?, ?, ?, ?, ?, 'PENDING')",
             [customer[0].customer_id, barber[0].employee_id, custom_service, appointment_date, appointment_time]
         );
         await promiseDb.query('INSERT INTO payments (appointment_id, amount, payment_method, payment_date) VALUES (?, ?, ?, ?)', [appointment.insertId, amount, payment_method || 'CASH', appointment_date]);
@@ -557,7 +557,7 @@ app.post('/api/customer/complaint', authenticateToken, authorizeRoles('CUSTOMER'
     const { subject, message } = req.body;
     const userId = req.user.userId;
     try {
-        await promiseDb.query('INSERT INTO complaints (user_id, role, subject, message) VALUES (?, "CUSTOMER", ?, ?)', [userId, subject, message]);
+        await promiseDb.query("INSERT INTO complaints (user_id, role, subject, message) VALUES (?, 'CUSTOMER', ?, ?)", [userId, subject, message]);
         res.json({ success: true });
     } catch (error) { res.status(500).json({ error: 'Failed to send complaint' }); }
 });
