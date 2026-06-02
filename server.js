@@ -161,14 +161,14 @@ app.get('/api/test/users', async (req, res) => {
 app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [paymentsResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
-        const [incomeResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM income');
         const [expensesResult] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
         const [customersResult] = await promiseDb.query('SELECT COUNT(*) as count FROM customers');
-        const totalRevenue = (paymentsResult[0].total || 0) + (incomeResult[0].total || 0);
+        const totalRevenue = parseFloat(paymentsResult[0].total) || 0;
+        const totalExpenses = parseFloat(expensesResult[0].total) || 0;
         res.json({
             totalRevenue,
-            totalExpenses: expensesResult[0].total || 0,
-            netProfit: totalRevenue - (expensesResult[0].total || 0),
+            totalExpenses,
+            netProfit: totalRevenue - totalExpenses,
             totalCustomers: customersResult[0].count || 0
         });
     } catch (error) {
@@ -181,14 +181,11 @@ app.get('/api/owner/dashboard', authenticateToken, authorizeRoles('OWNER'), asyn
 app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         let [monthlyRevenue] = await promiseDb.query(`
-            SELECT month, month_num, COALESCE(SUM(amount), 0) as revenue FROM (
-                SELECT DATE_FORMAT(payment_date, '%b') as month, MONTH(payment_date) as month_num, amount
-                FROM payments WHERE payment_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
-                UNION ALL
-                SELECT DATE_FORMAT(income_date, '%b') as month, MONTH(income_date) as month_num, amount
-                FROM income WHERE income_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
-            ) as combined
-            GROUP BY month_num ORDER BY month_num ASC
+            SELECT DATE_FORMAT(payment_date, '%b') as month, MONTH(payment_date) as month_num, COALESCE(SUM(amount), 0) as revenue
+            FROM payments
+            WHERE payment_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+            GROUP BY month, month_num
+            ORDER BY month_num ASC
         `);
         if (!monthlyRevenue || monthlyRevenue.length === 0) {
             monthlyRevenue = [
@@ -201,15 +198,21 @@ app.get('/api/owner/chart-data', authenticateToken, authorizeRoles('OWNER'), asy
             ];
         }
         const [paymentsTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM payments');
-        const [incomeTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM income');
         const [expensesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses');
         const [salariesTotal] = await promiseDb.query('SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE category = "Salary"');
         const [categoryExpenses] = await promiseDb.query('SELECT category, COALESCE(SUM(amount), 0) as total FROM expenses GROUP BY category');
+        
+        const revenueTotal = parseFloat(paymentsTotal[0]?.total) || 0;
+        const totalExp = parseFloat(expensesTotal[0]?.total) || 0;
+        const salariesTotalVal = parseFloat(salariesTotal[0]?.total) || 0;
+        const nonSalaryExpenses = Math.max(0, totalExp - salariesTotalVal);
+
         res.json({
             monthlyRevenue,
-            revenueTotal: (paymentsTotal[0]?.total || 0) + (incomeTotal[0]?.total || 0),
-            expensesTotal: expensesTotal[0]?.total || 0,
-            salariesTotal: salariesTotal[0]?.total || 0,
+            revenueTotal,
+            expensesTotal: totalExp,
+            nonSalaryExpenses,
+            salariesTotal: salariesTotalVal,
             categoryExpenses: categoryExpenses || []
         });
     } catch (error) {
@@ -276,8 +279,16 @@ app.post('/api/owner/pay-salary', authenticateToken, authorizeRoles('OWNER'), as
             'INSERT INTO expenses (description, amount, category, expense_date) VALUES (?, ?, "Salary", CURDATE())',
             [`Salary payment to ${emp[0].full_name}`, amount]
         );
+        const currentMonth = new Date().getMonth() + 1;
+        const currentYear = new Date().getFullYear();
+        await promiseDb.query(`
+            INSERT INTO salaries (employee_id, month, year, amount, paid_date)
+            VALUES (?, ?, ?, ?, CURDATE())
+            ON DUPLICATE KEY UPDATE amount = VALUES(amount), paid_date = VALUES(paid_date)
+        `, [employee_id, currentMonth, currentYear, amount]);
         res.json({ success: true });
     } catch (error) {
+        console.error('Pay salary error:', error);
         res.status(500).json({ error: 'Failed to pay salary' });
     }
 });
@@ -286,11 +297,23 @@ app.post('/api/owner/pay-salary', authenticateToken, authorizeRoles('OWNER'), as
 app.get('/api/owner/income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [income] = await promiseDb.query(`
-            SELECT income_id as id, source, amount, category, payment_method, income_date as date 
-            FROM income ORDER BY income_date DESC
+            SELECT 
+                p.payment_id as id,
+                c.full_name as customer_name,
+                p.appointment_id,
+                p.amount,
+                p.payment_method,
+                p.payment_date as date
+            FROM payments p
+            JOIN appointments a ON p.appointment_id = a.appointment_id
+            JOIN customers c ON a.customer_id = c.customer_id
+            ORDER BY p.payment_date DESC, p.payment_id DESC
         `);
         res.json(income);
-    } catch (error) { res.json([]); }
+    } catch (error) { 
+        console.error('Fetch income error:', error);
+        res.json([]); 
+    }
 });
 
 app.post('/api/owner/add-income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
@@ -385,19 +408,27 @@ app.post('/api/owner/reply-complaint/:id', authenticateToken, authorizeRoles('OW
 
 // ============ EMPLOYEE ENDPOINTS ============
 app.get('/api/employee/appointments/:employeeId', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
-    const { employeeId } = req.params;
+    const { employeeId } = req.params; // this is user_id from the frontend
     try {
+        const [emp] = await promiseDb.query('SELECT employee_id FROM employees WHERE user_id = ?', [employeeId]);
+        if (emp.length === 0) return res.json([]);
+        const dbEmployeeId = emp[0].employee_id;
         const [appointments] = await promiseDb.query(`
             SELECT a.*, c.full_name as customer_name, p.amount, p.payment_method,
-                   a.notes as service_description
+                   a.notes as service_description,
+                   a.time_slot as appointment_time,
+                   CASE WHEN p.amount IS NOT NULL THEN 'PAID' ELSE 'UNPAID' END as payment_status
             FROM appointments a
             JOIN customers c ON a.customer_id = c.customer_id
             LEFT JOIN payments p ON a.appointment_id = p.appointment_id
             WHERE a.employee_id = ?
             ORDER BY a.appointment_date DESC, a.time_slot ASC
-        `, [employeeId]);
+        `, [dbEmployeeId]);
         res.json(appointments);
-    } catch (error) { res.json([]); }
+    } catch (error) { 
+        console.error('Employee appointments error:', error);
+        res.json([]); 
+    }
 });
 
 app.put('/api/employee/appointments/:appointmentId/status', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
@@ -419,22 +450,25 @@ app.put('/api/employee/appointments/:appointmentId/reschedule', authenticateToke
 });
 
 app.get('/api/employee/salary/:employeeId', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
-    const { employeeId } = req.params;
+    const { employeeId } = req.params; // user_id
     try {
-        const [salary] = await promiseDb.query('SELECT salary FROM employees WHERE employee_id = ?', [employeeId]);
+        const [salary] = await promiseDb.query('SELECT salary FROM employees WHERE user_id = ?', [employeeId]);
         res.json({ salary: salary[0]?.salary || 0 });
     } catch (error) { res.json({ salary: 0 }); }
 });
 
 app.get('/api/employee/download-salary/:employeeId', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
-    const { employeeId } = req.params;
+    const { employeeId } = req.params; // user_id
     try {
-        const [emp] = await promiseDb.query('SELECT full_name, salary FROM employees WHERE employee_id = ?', [employeeId]);
+        const [emp] = await promiseDb.query('SELECT full_name, salary FROM employees WHERE user_id = ?', [employeeId]);
         const csv = `LEVIS.BARBER SALARY SLIP\n\nEmployee: ${emp[0].full_name}\nSalary Amount: M ${emp[0].salary}\nDate: ${new Date().toLocaleDateString()}\n\nThis is an official salary slip.`;
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', `attachment; filename=salary_${employeeId}.csv`);
         res.send(csv);
-    } catch (error) { res.status(500).json({ error: 'Failed to download salary' }); }
+    } catch (error) { 
+        console.error('Download salary error:', error);
+        res.status(500).json({ error: 'Failed to download salary' }); 
+    }
 });
 
 app.post('/api/employee/complaint', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
@@ -466,7 +500,7 @@ app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOM
         `);
         if (barber.length === 0) return res.status(404).json({ error: 'No barbers available' });
         const [appointment] = await promiseDb.query(
-            'INSERT INTO appointments (customer_id, employee_id, notes, appointment_date, time_slot, status) VALUES (?, ?, ?, ?, ?, "SCHEDULED")',
+            'INSERT INTO appointments (customer_id, employee_id, notes, appointment_date, time_slot, status) VALUES (?, ?, ?, ?, ?, "PENDING")',
             [customer[0].customer_id, barber[0].employee_id, custom_service, appointment_date, appointment_time]
         );
         await promiseDb.query('INSERT INTO payments (appointment_id, amount, payment_method, payment_date) VALUES (?, ?, ?, ?)', [appointment.insertId, amount, payment_method || 'CASH', appointment_date]);
@@ -484,7 +518,9 @@ app.get('/api/customer/my-appointments/:userId', authenticateToken, authorizeRol
         if (customer.length === 0) return res.json([]);
         const [appointments] = await promiseDb.query(`
             SELECT a.*, e.full_name as barber_name, p.amount, p.payment_method,
-                   a.notes as service_description
+                   a.notes as service_description,
+                   a.time_slot as appointment_time,
+                   CASE WHEN p.amount IS NOT NULL THEN 'PAID' ELSE 'UNPAID' END as payment_status
             FROM appointments a
             JOIN employees e ON a.employee_id = e.employee_id
             LEFT JOIN payments p ON a.appointment_id = p.appointment_id
@@ -492,7 +528,10 @@ app.get('/api/customer/my-appointments/:userId', authenticateToken, authorizeRol
             ORDER BY a.appointment_date DESC, a.time_slot ASC
         `, [customer[0].customer_id]);
         res.json(appointments);
-    } catch (error) { res.json([]); }
+    } catch (error) { 
+        console.error('Fetch customer appointments error:', error);
+        res.json([]); 
+    }
 });
 
 app.get('/api/customer/download-receipt/:appointmentId', authenticateToken, authorizeRoles('CUSTOMER'), async (req, res) => {
