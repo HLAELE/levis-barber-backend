@@ -293,7 +293,16 @@ app.post('/api/owner/pay-salary', authenticateToken, authorizeRoles('OWNER'), as
     }
 });
 
-// ============ INCOME MANAGEMENT ============
+// ============ INCOME TOTAL ============
+app.get('/api/owner/income-total', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    try {
+        const [result] = await promiseDb.query('SELECT COALESCE(SUM(amount),0) as total FROM income');
+        res.json({ totalIncome: parseFloat(result[0].total) || 0 });
+    } catch (error) {
+        console.error('Income total error:', error);
+        res.status(500).json({ error: 'Failed to fetch total income' });
+    }
+});
 app.get('/api/owner/income', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
     try {
         const [income] = await promiseDb.query(`
@@ -499,15 +508,23 @@ app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOM
             SELECT e.employee_id FROM employees e JOIN users u ON e.user_id = u.user_id WHERE u.is_approved = 1 LIMIT 1
         `);
         if (barber.length === 0) return res.status(404).json({ error: 'No barbers available' });
-        const [appointment] = await promiseDb.query(
-            "INSERT INTO appointments (customer_id, employee_id, notes, appointment_date, time_slot, status) VALUES (?, ?, ?, ?, ?, 'PENDING')",
+        // Validate required fields
+        if (!custom_service) {
+            return res.status(400).json({ error: 'Service description is required' });
+        }
+        if (!appointment_date || !appointment_time) {
+            return res.status(400).json({ error: 'Appointment date and time are required' });
+        }
+        if (amount == null || amount <= 0) {
+            return res.status(400).json({ error: 'Valid amount is required' });
+        }            "INSERT INTO appointments (customer_id, employee_id, custom_service, appointment_date, time_slot, status) VALUES (?, ?, ?, ?, ?, 'PENDING')",
             [customer[0].customer_id, barber[0].employee_id, custom_service, appointment_date, appointment_time]
         );
         await promiseDb.query('INSERT INTO payments (appointment_id, amount, payment_method, payment_date) VALUES (?, ?, ?, ?)', [appointment.insertId, amount, payment_method || 'CASH', appointment_date]);
         res.status(201).json({ success: true, message: 'Appointment booked successfully', appointmentId: appointment.insertId });
     } catch (error) { 
         console.error('Book appointment error:', error);
-        res.status(500).json({ error: 'Failed to book appointment' }); 
+        res.status(500).json({ error: error.message || 'Failed to book appointment' });
     }
 });
 
