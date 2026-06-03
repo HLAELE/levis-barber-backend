@@ -31,6 +31,24 @@ async function runMigration() {
         console.log('Updating existing SCHEDULED appointments to PENDING...');
         const [result] = await promiseDb.query("UPDATE appointments SET status = 'PENDING' WHERE status = 'SCHEDULED'");
         console.log(`Updated ${result.affectedRows} appointments to PENDING.`);
+
+        // 3. Create salaries table if it doesn't exist
+        console.log('Creating salaries table if it doesn\'t exist...');
+        await promiseDb.query(`
+            CREATE TABLE IF NOT EXISTS \`salaries\` (
+              \`salary_id\` int NOT NULL AUTO_INCREMENT,
+              \`employee_id\` int NOT NULL,
+              \`month\` int NOT NULL,
+              \`year\` int NOT NULL,
+              \`amount\` decimal(10, 2) NOT NULL,
+              \`paid_date\` date,
+              \`created_at\` timestamp DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (\`salary_id\`),
+              FOREIGN KEY (\`employee_id\`) REFERENCES \`employees\`(\`employee_id\`) ON DELETE CASCADE,
+              UNIQUE KEY \`unique_month_year_employee\` (\`employee_id\`, \`month\`, \`year\`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        `);
+        console.log('Successfully created/verified salaries table.');
         
         console.log('Database migration complete!');
     } catch (err) {
