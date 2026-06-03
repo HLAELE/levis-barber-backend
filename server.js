@@ -415,6 +415,139 @@ app.post('/api/owner/reply-complaint/:id', authenticateToken, authorizeRoles('OW
     }
 });
 
+// ============ FINANCIAL ANALYTICS ============
+app.get('/api/owner/financial-analytics', authenticateToken, authorizeRoles('OWNER'), async (req, res) => {
+    try {
+        const { startDate, endDate } = req.query;
+        let dateFilterPayments = '';
+        let dateFilterExpenses = '';
+        let dateFilterSalaries = '';
+        let dateFilterIncome = '';
+        let dateFilterAppointments = '';
+        const queryParams = [];
+
+        if (startDate && endDate) {
+            dateFilterPayments = 'WHERE payment_date >= ? AND payment_date <= ?';
+            dateFilterExpenses = 'WHERE expense_date >= ? AND expense_date <= ?';
+            dateFilterSalaries = 'WHERE paid_date >= ? AND paid_date <= ?';
+            dateFilterIncome = 'WHERE income_date >= ? AND income_date <= ?';
+            dateFilterAppointments = 'AND appointment_date >= ? AND appointment_date <= ?';
+            queryParams.push(startDate, endDate);
+        }
+
+        // 1. KPIs
+        const [[{ total_payments }]] = await promiseDb.query(`SELECT SUM(amount) as total_payments FROM payments ${dateFilterPayments}`, queryParams);
+        const [[{ total_income }]] = await promiseDb.query(`SELECT SUM(amount) as total_income FROM income ${dateFilterIncome}`, queryParams);
+        const [[{ total_expenses }]] = await promiseDb.query(`SELECT SUM(amount) as total_expenses FROM expenses ${dateFilterExpenses}`, queryParams);
+        const [[{ total_salaries }]] = await promiseDb.query(`SELECT SUM(amount) as total_salaries FROM salaries ${dateFilterSalaries}`, queryParams);
+        
+        const totalRevenue = (parseFloat(total_payments) || 0) + (parseFloat(total_income) || 0);
+        const totalExpenses = (parseFloat(total_expenses) || 0) + (parseFloat(total_salaries) || 0);
+        const netProfit = totalRevenue - totalExpenses;
+        const profitMargin = totalRevenue > 0 ? ((netProfit / totalRevenue) * 100).toFixed(2) : 0;
+        const grossProfit = totalRevenue; 
+        
+        let [[{ total_customers }]] = await promiseDb.query(`SELECT COUNT(*) as total_customers FROM customers ${startDate ? 'WHERE created_at <= ?' : ''}`, startDate ? [endDate + ' 23:59:59'] : []);
+        let [[{ total_appointments }]] = await promiseDb.query(`SELECT COUNT(*) as total_appointments FROM appointments WHERE status = 'COMPLETED' ${dateFilterAppointments}`, queryParams);
+        
+        const avgTransactionValue = total_appointments > 0 ? (totalRevenue / total_appointments).toFixed(2) : 0;
+
+        // 2. Monthly Trend & Revenue vs Expenses Chart
+        const [monthlyPayments] = await promiseDb.query(`SELECT YEAR(payment_date) as year, MONTH(payment_date) as month, SUM(amount) as total FROM payments ${dateFilterPayments} GROUP BY year, month`, queryParams);
+        const [monthlyIncome] = await promiseDb.query(`SELECT YEAR(income_date) as year, MONTH(income_date) as month, SUM(amount) as total FROM income ${dateFilterIncome} GROUP BY year, month`, queryParams);
+        const [monthlyExpenses] = await promiseDb.query(`SELECT YEAR(expense_date) as year, MONTH(expense_date) as month, SUM(amount) as total FROM expenses ${dateFilterExpenses} GROUP BY year, month`, queryParams);
+        const [monthlySalaries] = await promiseDb.query(`SELECT year, month, SUM(amount) as total FROM salaries ${dateFilterSalaries} GROUP BY year, month`, queryParams);
+
+        // Merge monthly data in JS
+        const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const monthlyDataMap = {};
+        
+        const processMonthly = (data, type) => {
+            data.forEach(item => {
+                if (!item.year || !item.month) return;
+                const key = `${item.year}-${item.month}`;
+                if (!monthlyDataMap[key]) monthlyDataMap[key] = { name: `${monthNames[item.month - 1]} ${item.year}`, sortKey: item.year * 100 + item.month, revenue: 0, expenses: 0 };
+                monthlyDataMap[key][type] += parseFloat(item.total);
+            });
+        };
+        processMonthly(monthlyPayments, 'revenue');
+        processMonthly(monthlyIncome, 'revenue');
+        processMonthly(monthlyExpenses, 'expenses');
+        processMonthly(monthlySalaries, 'expenses');
+
+        const monthlyTrend = Object.values(monthlyDataMap).sort((a, b) => a.sortKey - b.sortKey).map(item => ({
+            name: item.name,
+            revenue: item.revenue,
+            expenses: item.expenses,
+            netProfit: item.revenue - item.expenses
+        }));
+
+        // 3. Expense Breakdown Chart
+        const [expenseCategories] = await promiseDb.query(`
+            SELECT category, SUM(amount) as value 
+            FROM expenses ${dateFilterExpenses} 
+            GROUP BY category
+        `, queryParams);
+        const expensePieData = expenseCategories.map(c => ({ name: c.category || 'Other', value: parseFloat(c.value) }));
+        if (parseFloat(total_salaries) > 0) expensePieData.push({ name: 'Salaries', value: parseFloat(total_salaries) });
+
+        // 4. Income Sources Chart
+        const [incomeSources] = await promiseDb.query(`
+            SELECT source as name, SUM(amount) as value 
+            FROM income ${dateFilterIncome} 
+            GROUP BY source ORDER BY value DESC
+        `, queryParams);
+        const incomeBarData = [...incomeSources];
+        if (parseFloat(total_payments) > 0) incomeBarData.unshift({ name: 'Appointments', value: parseFloat(total_payments) });
+
+        // 5. Appointment Analytics
+        const [appointmentStatusCounts] = await promiseDb.query(`
+            SELECT status as name, COUNT(*) as value 
+            FROM appointments 
+            ${startDate ? `WHERE appointment_date >= ? AND appointment_date <= ?` : ''} 
+            GROUP BY status
+        `, startDate ? queryParams : []);
+
+        // 6. Employee Performance Analytics
+        const [employeePerformance] = await promiseDb.query(`
+            SELECT e.full_name as name, 
+                   COUNT(DISTINCT a.appointment_id) as appointments_served,
+                   COUNT(DISTINCT a.customer_id) as customer_count,
+                   SUM(p.amount) as revenue_generated
+            FROM employees e
+            LEFT JOIN appointments a ON e.employee_id = a.employee_id ${startDate ? `AND a.appointment_date >= ? AND a.appointment_date <= ?` : ''}
+            LEFT JOIN payments p ON a.appointment_id = p.appointment_id
+            GROUP BY e.employee_id
+            ORDER BY revenue_generated DESC
+        `, startDate ? queryParams : []);
+
+        res.json({
+            kpis: {
+                totalRevenue,
+                totalExpenses,
+                grossProfit,
+                profitMargin,
+                netProfit,
+                totalCustomers: total_customers,
+                totalAppointments: total_appointments,
+                avgTransactionValue
+            },
+            monthlyTrend,
+            expensePieData,
+            incomeBarData: incomeBarData.map(i => ({...i, value: parseFloat(i.value || 0)})),
+            appointmentStatusCounts,
+            employeePerformance: employeePerformance.map(e => ({
+                ...e,
+                revenue_generated: parseFloat(e.revenue_generated || 0)
+            }))
+        });
+
+    } catch (error) {
+        console.error('Financial analytics error:', error);
+        res.status(500).json({ error: 'Failed to fetch financial analytics data' });
+    }
+});
+
 // ============ EMPLOYEE ENDPOINTS ============
 app.get('/api/employee/appointments/:employeeId', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const { employeeId } = req.params; // this is user_id from the frontend
@@ -516,8 +649,9 @@ app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOM
             return res.status(400).json({ error: 'Appointment date and time are required' });
         }
         if (amount == null || amount <= 0) {
-            return res.status(400).json({ error: 'Valid amount is required' });
-        }            "INSERT INTO appointments (customer_id, employee_id, custom_service, appointment_date, time_slot, status) VALUES (?, ?, ?, ?, ?, 'PENDING')",
+        }
+        const [appointment] = await promiseDb.query(
+            "INSERT INTO appointments (customer_id, employee_id, custom_service, appointment_date, appointment_time, status) VALUES (?, ?, ?, ?, ?, 'PENDING')",
             [customer[0].customer_id, barber[0].employee_id, custom_service, appointment_date, appointment_time]
         );
         await promiseDb.query('INSERT INTO payments (appointment_id, amount, payment_method, payment_date) VALUES (?, ?, ?, ?)', [appointment.insertId, amount, payment_method || 'CASH', appointment_date]);
@@ -535,14 +669,14 @@ app.get('/api/customer/my-appointments/:userId', authenticateToken, authorizeRol
         if (customer.length === 0) return res.json([]);
         const [appointments] = await promiseDb.query(`
             SELECT a.*, e.full_name as barber_name, p.amount, p.payment_method,
-                   a.notes as service_description,
-                   a.time_slot as appointment_time,
+                   a.custom_service as service_description,
+                   a.appointment_time as appointment_time,
                    CASE WHEN p.amount IS NOT NULL THEN 'PAID' ELSE 'UNPAID' END as payment_status
             FROM appointments a
             JOIN employees e ON a.employee_id = e.employee_id
             LEFT JOIN payments p ON a.appointment_id = p.appointment_id
             WHERE a.customer_id = ?
-            ORDER BY a.appointment_date DESC, a.time_slot ASC
+            ORDER BY a.appointment_date DESC, a.appointment_time ASC
         `, [customer[0].customer_id]);
         res.json(appointments);
     } catch (error) { 
@@ -563,7 +697,7 @@ app.get('/api/customer/download-receipt/:appointmentId', authenticateToken, auth
         `, [appointmentId]);
         if (appt.length === 0) return res.status(404).json({ error: 'Appointment not found' });
         const a = appt[0];
-        const csv = `LEVIS.BARBER BOOKING RECEIPT\n\nAppointment ID: ${a.appointment_id}\nService: ${a.notes || 'N/A'}\nBarber: ${a.barber_name}\nDate: ${a.appointment_date}\nTime: ${a.time_slot}\nAmount Paid: M ${a.amount}\nPayment Method: ${a.payment_method}\nStatus: ${a.status}\n\nThank you for choosing LEVIS.BARBER!`;
+        const csv = `LEVIS.BARBER BOOKING RECEIPT\n\nAppointment ID: ${a.appointment_id}\nService: ${a.custom_service || 'N/A'}\nBarber: ${a.barber_name}\nDate: ${a.appointment_date}\nTime: ${a.appointment_time}\nAmount Paid: M ${a.amount}\nPayment Method: ${a.payment_method}\nStatus: ${a.status}\n\nThank you for choosing LEVIS.BARBER!`;
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', `attachment; filename=receipt_${appointmentId}.csv`);
         res.send(csv);
