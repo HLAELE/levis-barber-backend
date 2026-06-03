@@ -593,6 +593,29 @@ app.get('/api/owner/financial-analytics', authenticateToken, authorizeRoles('OWN
 });
 
 // ============ EMPLOYEE ENDPOINTS ============
+
+// All pending appointments visible to every employee (for Pending Approvals tab)
+app.get('/api/employee/all-pending', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
+    try {
+        const [appointments] = await promiseDb.query(`
+            SELECT a.*, c.full_name as customer_name, e.full_name as barber_name,
+                   p.amount, p.payment_method,
+                   a.notes as service_description,
+                   CASE WHEN p.amount IS NOT NULL THEN 'PAID' ELSE 'UNPAID' END as payment_status
+            FROM appointments a
+            JOIN customers c ON a.customer_id = c.customer_id
+            JOIN employees e ON a.employee_id = e.employee_id
+            LEFT JOIN payments p ON a.appointment_id = p.appointment_id
+            WHERE a.status = 'PENDING'
+            ORDER BY a.appointment_date ASC, a.appointment_time ASC
+        `);
+        res.json(appointments);
+    } catch (error) {
+        console.error('All pending appointments error:', error);
+        res.json([]);
+    }
+});
+
 app.get('/api/employee/appointments/:employeeId', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const { employeeId } = req.params; // this is user_id from the frontend
     try {
@@ -630,7 +653,10 @@ app.put('/api/employee/appointments/:appointmentId/reschedule', authenticateToke
     const { appointmentId } = req.params;
     const { appointment_date, appointment_time } = req.body;
     try {
-        await promiseDb.query('UPDATE appointments SET appointment_date = ?, appointment_time = ? WHERE appointment_id = ?', [appointment_date, appointment_time, appointmentId]);
+        await promiseDb.query(
+            "UPDATE appointments SET appointment_date = ?, appointment_time = ?, status = 'RESCHEDULED' WHERE appointment_id = ?",
+            [appointment_date, appointment_time, appointmentId]
+        );
         res.json({ success: true });
     } catch (error) { res.status(500).json({ error: 'Failed to reschedule' }); }
 });
