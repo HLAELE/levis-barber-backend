@@ -641,24 +641,20 @@ app.get('/api/employee/all-bookings', authenticateToken, authorizeRoles('EMPLOYE
 });
 
 app.get('/api/employee/appointments/:employeeId', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
-    const { employeeId } = req.params; // this is user_id from the frontend
     try {
-        const [emp] = await promiseDb.query('SELECT employee_id FROM employees WHERE user_id = ?', [employeeId]);
-        if (emp.length === 0) return res.json([]);
-        const dbEmployeeId = emp[0].employee_id;
         const [appointments] = await promiseDb.query(`
-            SELECT a.*, c.full_name as customer_name, p.amount, p.payment_method,
+            SELECT a.*, c.full_name as customer_name, e.full_name as barber_name, p.amount, p.payment_method,
                    a.notes as service_description,
                    a.appointment_time as appointment_time,
                    act.full_name as actioner_name,
                    CASE WHEN p.amount IS NOT NULL THEN 'PAID' ELSE 'UNPAID' END as payment_status
             FROM appointments a
             JOIN customers c ON a.customer_id = c.customer_id
+            JOIN employees e ON a.employee_id = e.employee_id
             LEFT JOIN employees act ON a.actioned_by = act.employee_id
             LEFT JOIN payments p ON a.appointment_id = p.appointment_id
-            WHERE a.employee_id = ?
             ORDER BY a.appointment_date DESC, a.appointment_time ASC
-        `, [dbEmployeeId]);
+        `);
         res.json(appointments);
     } catch (error) { 
         console.error('Employee appointments error:', error);
