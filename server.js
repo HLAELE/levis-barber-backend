@@ -594,24 +594,48 @@ app.get('/api/owner/financial-analytics', authenticateToken, authorizeRoles('OWN
 
 // ============ EMPLOYEE ENDPOINTS ============
 
-// All pending appointments visible to every employee (for Pending Approvals tab)
+// All bookings visible to every employee - all statuses so they can manage them
 app.get('/api/employee/all-pending', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     try {
         const [appointments] = await promiseDb.query(`
             SELECT a.*, c.full_name as customer_name, e.full_name as barber_name,
                    p.amount, p.payment_method,
                    a.notes as service_description,
+                   act.full_name as actioner_name,
                    CASE WHEN p.amount IS NOT NULL THEN 'PAID' ELSE 'UNPAID' END as payment_status
             FROM appointments a
             JOIN customers c ON a.customer_id = c.customer_id
             JOIN employees e ON a.employee_id = e.employee_id
+            LEFT JOIN employees act ON a.actioned_by = act.employee_id
             LEFT JOIN payments p ON a.appointment_id = p.appointment_id
-            WHERE a.status = 'PENDING'
             ORDER BY a.appointment_date ASC, a.appointment_time ASC
         `);
         res.json(appointments);
     } catch (error) {
-        console.error('All pending appointments error:', error);
+        console.error('All bookings error:', error);
+        res.json([]);
+    }
+});
+
+// Alias route: /all-bookings
+app.get('/api/employee/all-bookings', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
+    try {
+        const [appointments] = await promiseDb.query(`
+            SELECT a.*, c.full_name as customer_name, e.full_name as barber_name,
+                   p.amount, p.payment_method,
+                   a.notes as service_description,
+                   act.full_name as actioner_name,
+                   CASE WHEN p.amount IS NOT NULL THEN 'PAID' ELSE 'UNPAID' END as payment_status
+            FROM appointments a
+            JOIN customers c ON a.customer_id = c.customer_id
+            JOIN employees e ON a.employee_id = e.employee_id
+            LEFT JOIN employees act ON a.actioned_by = act.employee_id
+            LEFT JOIN payments p ON a.appointment_id = p.appointment_id
+            ORDER BY a.appointment_date ASC, a.appointment_time ASC
+        `);
+        res.json(appointments);
+    } catch (error) {
+        console.error('All bookings error:', error);
         res.json([]);
     }
 });
@@ -626,9 +650,11 @@ app.get('/api/employee/appointments/:employeeId', authenticateToken, authorizeRo
             SELECT a.*, c.full_name as customer_name, p.amount, p.payment_method,
                    a.notes as service_description,
                    a.appointment_time as appointment_time,
+                   act.full_name as actioner_name,
                    CASE WHEN p.amount IS NOT NULL THEN 'PAID' ELSE 'UNPAID' END as payment_status
             FROM appointments a
             JOIN customers c ON a.customer_id = c.customer_id
+            LEFT JOIN employees act ON a.actioned_by = act.employee_id
             LEFT JOIN payments p ON a.appointment_id = p.appointment_id
             WHERE a.employee_id = ?
             ORDER BY a.appointment_date DESC, a.appointment_time ASC
@@ -643,22 +669,37 @@ app.get('/api/employee/appointments/:employeeId', authenticateToken, authorizeRo
 app.put('/api/employee/appointments/:appointmentId/status', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const { appointmentId } = req.params;
     const { status } = req.body;
+    const userId = req.user.userId;
     try {
-        await promiseDb.query('UPDATE appointments SET status = ? WHERE appointment_id = ?', [status, appointmentId]);
+        const [emp] = await promiseDb.query('SELECT employee_id FROM employees WHERE user_id = ?', [userId]);
+        const employeeId = emp[0]?.employee_id || null;
+        await promiseDb.query(
+            'UPDATE appointments SET status = ?, actioned_by = ?, actioned_at = CURRENT_TIMESTAMP WHERE appointment_id = ?',
+            [status, employeeId, appointmentId]
+        );
         res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: 'Failed to update status' }); }
+    } catch (error) {
+        console.error('Update status error:', error);
+        res.status(500).json({ error: 'Failed to update status' });
+    }
 });
 
 app.put('/api/employee/appointments/:appointmentId/reschedule', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
     const { appointmentId } = req.params;
     const { appointment_date, appointment_time } = req.body;
+    const userId = req.user.userId;
     try {
+        const [emp] = await promiseDb.query('SELECT employee_id FROM employees WHERE user_id = ?', [userId]);
+        const employeeId = emp[0]?.employee_id || null;
         await promiseDb.query(
-            "UPDATE appointments SET appointment_date = ?, appointment_time = ?, status = 'RESCHEDULED' WHERE appointment_id = ?",
-            [appointment_date, appointment_time, appointmentId]
+            "UPDATE appointments SET appointment_date = ?, appointment_time = ?, status = 'RESCHEDULED', actioned_by = ?, actioned_at = CURRENT_TIMESTAMP WHERE appointment_id = ?",
+            [appointment_date, appointment_time, employeeId, appointmentId]
         );
         res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: 'Failed to reschedule' }); }
+    } catch (error) {
+        console.error('Reschedule error:', error);
+        res.status(500).json({ error: 'Failed to reschedule' });
+    }
 });
 
 app.get('/api/employee/salary/:employeeId', authenticateToken, authorizeRoles('EMPLOYEE'), async (req, res) => {
