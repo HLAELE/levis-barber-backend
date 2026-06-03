@@ -446,6 +446,46 @@ app.get('/api/owner/financial-analytics', authenticateToken, authorizeRoles('OWN
         const netProfit = totalRevenue - totalExpenses;
         const profitMargin = totalRevenue > 0 ? ((netProfit / totalRevenue) * 100).toFixed(2) : 0;
         const grossProfit = totalRevenue; 
+        const roi = totalExpenses > 0 ? ((netProfit / totalExpenses) * 100).toFixed(2) : (totalRevenue > 0 ? 100 : 0);
+        
+        // Previous Period calculations for trends
+        let revenueTrend = 0;
+        let expenseTrend = 0;
+        let profitTrend = 0;
+
+        if (startDate && endDate) {
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            const diffTime = Math.abs(end - start);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            
+            const pEnd = new Date(start);
+            pEnd.setDate(pEnd.getDate() - 1);
+            const pStart = new Date(pEnd);
+            pStart.setDate(pStart.getDate() - diffDays);
+
+            const prevStartDate = pStart.toISOString().split('T')[0];
+            const prevEndDate = pEnd.toISOString().split('T')[0];
+            const prevParams = [prevStartDate, prevEndDate];
+            
+            const [[{ p_payments }]] = await promiseDb.query(`SELECT SUM(amount) as p_payments FROM payments WHERE payment_date >= ? AND payment_date <= ?`, prevParams);
+            const [[{ p_income }]] = await promiseDb.query(`SELECT SUM(amount) as p_income FROM income WHERE income_date >= ? AND income_date <= ?`, prevParams);
+            const [[{ p_expenses }]] = await promiseDb.query(`SELECT SUM(amount) as p_expenses FROM expenses WHERE expense_date >= ? AND expense_date <= ?`, prevParams);
+            const [[{ p_salaries }]] = await promiseDb.query(`SELECT SUM(amount) as p_salaries FROM salaries WHERE paid_date >= ? AND paid_date <= ?`, prevParams);
+            
+            const prevRevenue = (parseFloat(p_payments) || 0) + (parseFloat(p_income) || 0);
+            const prevExpenses = (parseFloat(p_expenses) || 0) + (parseFloat(p_salaries) || 0);
+            const prevNetProfit = prevRevenue - prevExpenses;
+
+            if (prevRevenue > 0) revenueTrend = (((totalRevenue - prevRevenue) / prevRevenue) * 100).toFixed(1);
+            else if (totalRevenue > 0) revenueTrend = 100;
+
+            if (prevExpenses > 0) expenseTrend = (((totalExpenses - prevExpenses) / prevExpenses) * 100).toFixed(1);
+            else if (totalExpenses > 0) expenseTrend = 100;
+            
+            if (prevNetProfit > 0) profitTrend = (((netProfit - prevNetProfit) / prevNetProfit) * 100).toFixed(1);
+            else if (netProfit > 0) profitTrend = 100;
+        }
         
         let [[{ total_customers }]] = await promiseDb.query(`SELECT COUNT(*) as total_customers FROM customers ${startDate ? 'WHERE created_at <= ?' : ''}`, startDate ? [endDate + ' 23:59:59'] : []);
         let [[{ total_appointments }]] = await promiseDb.query(`SELECT COUNT(*) as total_appointments FROM appointments WHERE status = 'COMPLETED' ${dateFilterAppointments}`, queryParams);
@@ -528,6 +568,10 @@ app.get('/api/owner/financial-analytics', authenticateToken, authorizeRoles('OWN
                 grossProfit,
                 profitMargin,
                 netProfit,
+                roi,
+                revenueTrend,
+                expenseTrend,
+                profitTrend,
                 totalCustomers: total_customers,
                 totalAppointments: total_appointments,
                 avgTransactionValue
