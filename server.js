@@ -602,13 +602,13 @@ app.get('/api/employee/appointments/:employeeId', authenticateToken, authorizeRo
         const [appointments] = await promiseDb.query(`
             SELECT a.*, c.full_name as customer_name, p.amount, p.payment_method,
                    a.notes as service_description,
-                   a.time_slot as appointment_time,
+                   a.appointment_time as appointment_time,
                    CASE WHEN p.amount IS NOT NULL THEN 'PAID' ELSE 'UNPAID' END as payment_status
             FROM appointments a
             JOIN customers c ON a.customer_id = c.customer_id
             LEFT JOIN payments p ON a.appointment_id = p.appointment_id
             WHERE a.employee_id = ?
-            ORDER BY a.appointment_date DESC, a.time_slot ASC
+            ORDER BY a.appointment_date DESC, a.appointment_time ASC
         `, [dbEmployeeId]);
         res.json(appointments);
     } catch (error) { 
@@ -630,7 +630,7 @@ app.put('/api/employee/appointments/:appointmentId/reschedule', authenticateToke
     const { appointmentId } = req.params;
     const { appointment_date, appointment_time } = req.body;
     try {
-        await promiseDb.query('UPDATE appointments SET appointment_date = ?, time_slot = ? WHERE appointment_id = ?', [appointment_date, appointment_time, appointmentId]);
+        await promiseDb.query('UPDATE appointments SET appointment_date = ?, appointment_time = ? WHERE appointment_id = ?', [appointment_date, appointment_time, appointmentId]);
         res.json({ success: true });
     } catch (error) { res.status(500).json({ error: 'Failed to reschedule' }); }
 });
@@ -695,7 +695,7 @@ app.post('/api/customer/appointments', authenticateToken, authorizeRoles('CUSTOM
         if (amount == null || amount <= 0) {
         }
         const [appointment] = await promiseDb.query(
-            "INSERT INTO appointments (customer_id, employee_id, custom_service, appointment_date, appointment_time, status) VALUES (?, ?, ?, ?, ?, 'PENDING')",
+            "INSERT INTO appointments (customer_id, employee_id, notes, appointment_date, appointment_time, status) VALUES (?, ?, ?, ?, ?, 'PENDING')",
             [customer[0].customer_id, barber[0].employee_id, custom_service, appointment_date, appointment_time]
         );
         await promiseDb.query('INSERT INTO payments (appointment_id, amount, payment_method, payment_date) VALUES (?, ?, ?, ?)', [appointment.insertId, amount, payment_method || 'CASH', appointment_date]);
@@ -713,7 +713,7 @@ app.get('/api/customer/my-appointments/:userId', authenticateToken, authorizeRol
         if (customer.length === 0) return res.json([]);
         const [appointments] = await promiseDb.query(`
             SELECT a.*, e.full_name as barber_name, p.amount, p.payment_method,
-                   a.custom_service as service_description,
+                   a.notes as service_description,
                    a.appointment_time as appointment_time,
                    CASE WHEN p.amount IS NOT NULL THEN 'PAID' ELSE 'UNPAID' END as payment_status
             FROM appointments a
@@ -741,7 +741,7 @@ app.get('/api/customer/download-receipt/:appointmentId', authenticateToken, auth
         `, [appointmentId]);
         if (appt.length === 0) return res.status(404).json({ error: 'Appointment not found' });
         const a = appt[0];
-        const csv = `LEVIS.BARBER BOOKING RECEIPT\n\nAppointment ID: ${a.appointment_id}\nService: ${a.custom_service || 'N/A'}\nBarber: ${a.barber_name}\nDate: ${a.appointment_date}\nTime: ${a.appointment_time}\nAmount Paid: M ${a.amount}\nPayment Method: ${a.payment_method}\nStatus: ${a.status}\n\nThank you for choosing LEVIS.BARBER!`;
+        const csv = `LEVIS.BARBER BOOKING RECEIPT\n\nAppointment ID: ${a.appointment_id}\nService: ${a.notes || 'N/A'}\nBarber: ${a.barber_name}\nDate: ${a.appointment_date}\nTime: ${a.appointment_time}\nAmount Paid: M ${a.amount}\nPayment Method: ${a.payment_method}\nStatus: ${a.status}\n\nThank you for choosing LEVIS.BARBER!`;
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', `attachment; filename=receipt_${appointmentId}.csv`);
         res.send(csv);
